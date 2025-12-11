@@ -15,3 +15,9 @@ services:
         sync: false
       - key: CHANNELS
         sync: false
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: TELEGRAM_ADMIN_ID
+        sync: false
+      - key: HEADLESS
+        value: "true"
