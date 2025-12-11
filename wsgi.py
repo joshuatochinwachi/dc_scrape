@@ -8,10 +8,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# NOTE: Eventlet removed to prevent conflict with Playwright Sync API
-# We rely on Flask-SocketIO 'threading' mode which works with standard Gunicorn workers
-
-from app import app, telegram_bot, run_archiver_logic_async
+# Fix: Import telegram_bot directly from the file, not from 'app'
+import telegram_bot
+from app import app, run_archiver_logic_async
 
 # Start Telegram Bot in background thread (isolated)
 if os.getenv("TELEGRAM_TOKEN"):
@@ -20,15 +19,12 @@ if os.getenv("TELEGRAM_TOKEN"):
 
 # Start archiver in a standard isolated thread
 def start_archiver():
-    # We use a standard thread instead of ThreadPoolExecutor to ensure
-    # a clean context for Playwright without leftover async loops
+    # Use standard thread to ensure clean context for Playwright
     t_archiver = threading.Thread(target=run_archiver_logic_async, daemon=True)
     t_archiver.start()
 
 # Start archiver immediately on startup
 start_archiver()
 
-# Export app for Gunicorn
-# Command to run: gunicorn -w 1 --threads 100 wsgi:application
 if __name__ != '__main__':
     application = app
