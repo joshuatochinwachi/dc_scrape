@@ -2,10 +2,12 @@ services:
   - type: web
     name: discord-archiver
     env: docker
-    plan: free
+    plan: starter  # Recommend upgrading from free for better stability
     region: oregon
-    buildCommand: pip install --no-cache-dir -r requirements.txt && playwright install chromium && playwright install-deps
-    startCommand: gunicorn --worker-class eventlet -w 1 -b 0.0.0.0:5000 wsgi:application
+    # Use the Dockerfile instead of manual pip installs for better caching
+    dockerfilePath: ./Dockerfile
+    # Optimized start command for Flask-SocketIO
+    startCommand: "gunicorn --worker-class eventlet -w 1 --timeout 300 --keep-alive 5 --bind 0.0.0.0:$PORT wsgi:application"
     envVars:
       - key: SUPABASE_URL
         sync: false
@@ -21,7 +23,20 @@ services:
         sync: false
       - key: TELEGRAM_ADMIN_ID
         sync: false
-      - key: RENDER_SERVICE_URL
-        sync: false
       - key: HEADLESS
         value: "true"
+      # Performance tuning for Playwright in cloud
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: "/ms-playwright"
+      - key: NODE_OPTIONS
+        value: "--max-old-space-size=2048"
+      # Prevent memory leaks
+      - key: PYTHONUNBUFFERED
+        value: "1"
+    # Health check to restart if service becomes unresponsive
+    healthCheckPath: /health
+    # Disk storage for browser cache and session state
+    disk:
+      name: archiver-data
+      mountPath: /app/data
+      sizeGB: 1

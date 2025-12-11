@@ -185,11 +185,18 @@ async def broadcast_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e: logger.error(f"Job error: {e}")
 
 def run_bot():
+    """Run bot in thread-safe mode without signal handlers"""
     if not TELEGRAM_TOKEN: return
+    
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("redeem", redeem))
     app.add_handler(CommandHandler("gen", gen_code))
-    if app.job_queue: app.job_queue.run_repeating(broadcast_job, interval=POLL_INTERVAL, first=10)
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    
+    if app.job_queue: 
+        app.job_queue.run_repeating(broadcast_job, interval=POLL_INTERVAL, first=10)
+    
+    # Use stop_signals=[] to prevent signal handler registration
+    # This allows the bot to run safely in a background thread
+    app.run_polling(allowed_updates=Update.ALL_TYPES, stop_signals=[])
