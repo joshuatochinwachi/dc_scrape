@@ -18,6 +18,29 @@ import supabase_utils
 # --- Prevent event loop conflicts ---
 os.environ['EVENTLET_NOKQUEUE'] = '1'
 
+# CRITICAL FIX: Prevent asyncio event loop conflicts with Playwright
+import asyncio
+import sys
+
+def disable_asyncio_loop():
+    """Disable asyncio event loop to allow Playwright sync API"""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.close()
+    except RuntimeError:
+        pass
+    
+    # Set a dummy event loop policy that does nothing
+    asyncio.set_event_loop_policy(None)
+    try:
+        asyncio.set_event_loop(None)
+    except:
+        pass
+
+# Call this before any Playwright code
+disable_asyncio_loop()
+
 # --- Configuration ---
 CHANNELS = os.getenv("CHANNELS", "").split(",")
 CHANNELS = [c.strip() for c in CHANNELS if c.strip()]
@@ -286,12 +309,18 @@ def wait_for_messages_to_load(page, max_wait=15):
 def run_archiver_logic_async():
     log("🚀 Thread started.")
     
-    import asyncio
+    # CRITICAL: Clear any existing event loop in this thread
     try:
         loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.set_event_loop(None)
-    except RuntimeError:
+        if loop and loop.is_running():
+            loop.close()
+    except:
+        pass
+    
+    # Ensure no event loop exists
+    try:
+        asyncio.set_event_loop(None)
+    except:
         pass
     
     state_path = os.path.join(DATA_DIR, STORAGE_STATE_FILE)
