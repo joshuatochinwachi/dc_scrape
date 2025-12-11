@@ -218,176 +218,176 @@ def run_archiver_logic():
 
     try:
         with sync_playwright() as p:
-        browser = p.chromium.launch(headless=HEADLESS_MODE, args=['--disable-blink-features=AutomationControlled'])
-        
-        # Determine context storage
-        context_args = {
-            "viewport": {'width': 1280, 'height': 800},
-            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-        }
-        if os.path.exists(state_path):
-            context_args["storage_state"] = state_path
+            browser = p.chromium.launch(headless=HEADLESS_MODE, args=['--disable-blink-features=AutomationControlled'])
             
-        context = browser.new_context(**context_args)
-        page = context.new_page()
-        
-        set_status("RUNNING")
+            # Determine context storage
+            context_args = {
+                "viewport": {'width': 1280, 'height': 800},
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+            }
+            if os.path.exists(state_path):
+                context_args["storage_state"] = state_path
+            
+            context = browser.new_context(**context_args)
+            page = context.new_page()
+            
+            set_status("RUNNING")
 
-        while not stop_event.is_set():
-            try:
-                # 1. Login Check
-                if "discord.com/login" in page.url or page.locator('div[class*="qrCodeContainer"]').count() > 0:
-                    log("🔒 Login required. Please log in via the Web UI.")
-                    page.goto("https://discord.com/login")
-                    # Wait loop for user interaction
-                    for _ in range(120): # Wait 2 mins max
-                        if "discord.com/channels" in page.url: break
+            while not stop_event.is_set():
+                try:
+                    # 1. Login Check
+                    if "discord.com/login" in page.url or page.locator('div[class*="qrCodeContainer"]').count() > 0:
+                        log("🔒 Login required. Please log in via the Web UI.")
+                        page.goto("https://discord.com/login")
+                        # Wait loop for user interaction
+                        for _ in range(120): # Wait 2 mins max
+                            if "discord.com/channels" in page.url: break
+                            
+                            # Process clicks
+                            try:
+                                while not input_queue.empty():
+                                    action = input_queue.get_nowait()
+                                    if action['type'] == 'click':
+                                        vp = page.viewport_size
+                                        page.mouse.click(action['x'] * vp['width'], action['y'] * vp['height'])
+                            except: pass
+                            
+                            # Screenshot
+                            try:
+                                scr = page.screenshot(quality=40, type='jpeg')
+                                socketio.emit('screenshot', base64.b64encode(scr).decode('utf-8'))
+                            except: pass
+                            time.sleep(1)
+
+                        if "discord.com/channels" in page.url:
+                            context.storage_state(path=state_path)
+                            supabase_utils.upload_file(state_path, SUPABASE_BUCKET, remote_state_path, debug=False)
+                            log("✅ Login saved.")
+                        else:
+                            # Login failed after 2 minutes
+                            log("❌ Login failed after 2 minutes. Session expired or captcha blocking.")
+                            send_alert_email(
+                                "Login Failed - Manual Intervention Required",
+                                "Discord login failed after 2 minutes.\nPossible causes:\n- Captcha required\n- Session expired\n- 2FA needed\n\nPlease restart from the web service when ready."
+                            )
+                            # Wait a bit before retrying
+                            time.sleep(300)  # Wait 5 minutes before retrying login
+                    
+                    # 2. Scrape Channels
+                    for channel_url in CHANNELS:
+                        if stop_event.is_set(): break
                         
-                        # Process clicks
-                        try:
-                            while not input_queue.empty():
-                                action = input_queue.get_nowait()
-                                if action['type'] == 'click':
-                                    vp = page.viewport_size
-                                    page.mouse.click(action['x'] * vp['width'], action['y'] * vp['height'])
-                        except: pass
+                        log(f"📂 Visiting {channel_url}...")
+                        page_loaded = False
+                        for retry in range(3):
+                            try:
+                                page.goto(channel_url, timeout=30000)
+                                page.wait_for_selector('li[id^="chat-messages-"]', timeout=5000)
+                                page_loaded = True
+                                break
+                            except Exception as e:
+                                if retry < 2:
+                                    wait_time = 2 ** (retry + 1)
+                                    log(f"⚠️ Load failed (retry {retry + 1}/3): {str(e)[:80]}...")
+                                    time.sleep(wait_time)
+                                else:
+                                    log(f"❌ Failed after 3 retries: {str(e)[:80]}...")
                         
-                        # Screenshot
-                        try:
-                            scr = page.screenshot(quality=40, type='jpeg')
-                            socketio.emit('screenshot', base64.b64encode(scr).decode('utf-8'))
-                        except: pass
-                        time.sleep(1)
+                        if not page_loaded:
+                            continue
 
-                    if "discord.com/channels" in page.url:
-                        context.storage_state(path=state_path)
-                        supabase_utils.upload_file(state_path, SUPABASE_BUCKET, remote_state_path, debug=False)
-                        log("✅ Login saved.")
-                    else:
-                        # Login failed after 2 minutes
-                        log("❌ Login failed after 2 minutes. Session expired or captcha blocking.")
-                        send_alert_email(
-                            "Login Failed - Manual Intervention Required",
-                            "Discord login failed after 2 minutes.\nPossible causes:\n- Captcha required\n- Session expired\n- 2FA needed\n\nPlease restart from the web service when ready."
-                        )
-                        # Wait a bit before retrying
-                        time.sleep(300)  # Wait 5 minutes before retrying login
-                
-                # 2. Scrape Channels
-                for channel_url in CHANNELS:
-                    if stop_event.is_set(): break
-                    
-                    log(f"📂 Visiting {channel_url}...")
-                    page_loaded = False
-                    for retry in range(3):
-                        try:
-                            page.goto(channel_url, timeout=30000)
-                            page.wait_for_selector('li[id^="chat-messages-"]', timeout=5000)
-                            page_loaded = True
-                            break
-                        except Exception as e:
-                            if retry < 2:
-                                wait_time = 2 ** (retry + 1)
-                                log(f"⚠️ Load failed (retry {retry + 1}/3): {str(e)[:80]}...")
-                                time.sleep(wait_time)
-                            else:
-                                log(f"❌ Failed after 3 retries: {str(e)[:80]}...")
-                    
-                    if not page_loaded:
-                        continue
+                        messages = page.locator('li[id^="chat-messages-"]')
+                        count = messages.count()
+                        log(f"   Found {count} messages in DOM.")
+                        
+                        batch = []
+                        current_ids = last_ids.get(channel_url, [])
+                        
+                        # Scrape last 10 messages only to be safe
+                        start_idx = max(0, count - 10)
+                        
+                        for i in range(start_idx, count):
+                            try:
+                                msg = messages.nth(i)
+                                
+                                # ID Extraction
+                                raw_id = msg.get_attribute('id')
+                                if not raw_id: continue
+                                msg_id = raw_id.replace('chat-messages-', '')
+                                
+                                if msg_id in current_ids: continue
+                                
+                                # Content Extraction (Robust Selector)
+                                content = ""
+                                # Try standard content div
+                                content_loc = msg.locator('[id^="message-content-"]')
+                                if content_loc.count() > 0:
+                                    content = content_loc.inner_text()
+                                
+                                # Author Extraction
+                                author = "Unknown"
+                                header = msg.locator('h3')
+                                if header.count() > 0:
+                                    author = header.inner_text().split('\n')[0]
 
-                    messages = page.locator('li[id^="chat-messages-"]')
-                    count = messages.count()
-                    log(f"   Found {count} messages in DOM.")
-                    
-                    batch = []
-                    current_ids = last_ids.get(channel_url, [])
-                    
-                    # Scrape last 10 messages only to be safe
-                    start_idx = max(0, count - 10)
-                    
-                    for i in range(start_idx, count):
-                        try:
-                            msg = messages.nth(i)
-                            
-                            # ID Extraction
-                            raw_id = msg.get_attribute('id')
-                            if not raw_id: continue
-                            msg_id = raw_id.replace('chat-messages-', '')
-                            
-                            if msg_id in current_ids: continue
-                            
-                            # Content Extraction (Robust Selector)
-                            content = ""
-                            # Try standard content div
-                            content_loc = msg.locator('[id^="message-content-"]')
-                            if content_loc.count() > 0:
-                                content = content_loc.inner_text()
-                            
-                            # Author Extraction
-                            author = "Unknown"
-                            header = msg.locator('h3')
-                            if header.count() > 0:
-                                author = header.inner_text().split('\n')[0]
+                                # Media (Simplified)
+                                media = {"images": []}
+                                imgs = msg.locator('img[class^="originalLink-"], a[href*="cdn.discordapp.com"] img')
+                                for k in range(imgs.count()):
+                                    src = imgs.nth(k).get_attribute('src')
+                                    if src: media["images"].append({"url": src})
 
-                            # Media (Simplified)
-                            media = {"images": []}
-                            imgs = msg.locator('img[class^="originalLink-"], a[href*="cdn.discordapp.com"] img')
-                            for k in range(imgs.count()):
-                                src = imgs.nth(k).get_attribute('src')
-                                if src: media["images"].append({"url": src})
+                                # Timestamp
+                                # Discord timestamp is usually in a <time> tag
+                                ts = datetime.utcnow().isoformat()
+                                time_tag = msg.locator('time')
+                                if time_tag.count() > 0:
+                                    dt_str = time_tag.get_attribute('datetime')
+                                    if dt_str: ts = dt_str
 
-                            # Timestamp
-                            # Discord timestamp is usually in a <time> tag
-                            ts = datetime.utcnow().isoformat()
-                            time_tag = msg.locator('time')
-                            if time_tag.count() > 0:
-                                dt_str = time_tag.get_attribute('datetime')
-                                if dt_str: ts = dt_str
-
-                            record = {
-                                "id": int(msg_id),
-                                "channel_id": int(channel_url.split('/')[-1]),
-                                "content": clean_text(content),
-                                "scraped_at": datetime.utcnow().isoformat(),
-                                "raw_data": {
-                                    "author": clean_text(author),
-                                    "timestamp": ts,
-                                    "media": media,
-                                    "channel_url": channel_url
+                                record = {
+                                    "id": int(msg_id),
+                                    "channel_id": int(channel_url.split('/')[-1]),
+                                    "content": clean_text(content),
+                                    "scraped_at": datetime.utcnow().isoformat(),
+                                    "raw_data": {
+                                        "author": clean_text(author),
+                                        "timestamp": ts,
+                                        "media": media,
+                                        "channel_url": channel_url
+                                    }
                                 }
-                            }
-                            batch.append(record)
-                            current_ids.append(msg_id)
-                            
-                        except Exception as e:
-                            pass # Skip individual bad messages
-                    
-                    # Upload Batch
-                    if batch:
-                        log(f"   ⬆️ Uploading {len(batch)} new messages...")
-                        supabase_utils.insert_discord_messages(batch)
+                                batch.append(record)
+                                current_ids.append(msg_id)
+                                
+                            except Exception as e:
+                                pass # Skip individual bad messages
                         
-                        # Update Cache
-                        if len(current_ids) > 200: current_ids = current_ids[-200:]
-                        last_ids[channel_url] = current_ids
-                        with open(last_ids_path, 'w') as f: json.dump(last_ids, f)
+                        # Upload Batch
+                        if batch:
+                            log(f"   ⬆️ Uploading {len(batch)} new messages...")
+                            supabase_utils.insert_discord_messages(batch)
+                            
+                            # Update Cache
+                            if len(current_ids) > 200: current_ids = current_ids[-200:]
+                            last_ids[channel_url] = current_ids
+                            with open(last_ids_path, 'w') as f: json.dump(last_ids, f)
 
-                    # Short sleep between channels
-                    time.sleep(2)
+                        # Short sleep between channels
+                        time.sleep(2)
 
-                # Wait before next cycle
-                log("💤 Cycle done. Sleeping 30s...")
-                for _ in range(30):
-                    if stop_event.is_set(): break
-                    time.sleep(1)
+                    # Wait before next cycle
+                    log("💤 Cycle done. Sleeping 30s...")
+                    for _ in range(30):
+                        if stop_event.is_set(): break
+                        time.sleep(1)
                     
-            except Exception as e:
-                log(f"💥 Critical Loop Error: {e}")
-                time.sleep(10)
-        
-        context.close()
-        browser.close()
+                except Exception as e:
+                    log(f"💥 Critical Loop Error: {e}")
+                    time.sleep(10)
+            
+            context.close()
+            browser.close()
     
     except Exception as e:
         log(f"❌ Fatal Playwright Error: {e}")
