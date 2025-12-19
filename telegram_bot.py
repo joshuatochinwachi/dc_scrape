@@ -388,120 +388,239 @@ def clean_text(text: str) -> str:
     return text
 
 
+# --- CHANNEL SPECIFIC FORMATTERS ---
+
+CHANNEL_COLLECTORS = "1367813504786108526"
+CHANNEL_ARGOS = "855164313006505994"
+CHANNEL_RESTOCKS = "864504557903937587"
+
+def _format_collectors_amazon(msg_data: Dict, embed: Dict) -> Tuple[List[str], List[List[InlineKeyboardButton]]]:
+    """Formatter for Collectors Edge / Amazon V3 (Channel 136...)"""
+    lines = []
+    keyboard = []
+    
+    # 1. Header & Title (Retailer or Author)
+    author_name = msg_data.get("raw_data", {}).get("author", {}).get("name")
+    if not author_name and embed.get("author"):
+        author_name = embed["author"].get("name")
+        
+    if author_name and "unknown" not in author_name.lower():
+        lines.append(f"🏪 <b>{clean_text(author_name)}</b>")
+        lines.append("")
+
+    title = clean_text(embed.get("title", "Product Alert"))
+    lines.append(f"📦 <b>{title}</b>")
+    lines.append("━━━━━━━━━━━━━━━")
+    lines.append("")
+    
+    # 2. Key Fields (Price, Stock)
+    fields = embed.get("fields", [])
+    price = None
+    stock = None
+    
+    for f in fields:
+        name = clean_text(f.get("name", "")).lower()
+        val = clean_text(f.get("value", ""))
+        if "price" in name and "n/a" not in val.lower(): price = val
+        if "stock" in name and "n/a" not in val.lower(): stock = val
+    
+    if price:
+        lines.append(f"💰 <b>Price:</b> <b>{price}</b>")
+    if stock:
+        lines.append(f"📦 <b>Stock:</b> {stock}")
+        
+    lines.append("")
+    
+    return lines, []
+
+def _format_argos(msg_data: Dict, embed: Dict) -> Tuple[List[str], List[List[InlineKeyboardButton]]]:
+    """Formatter for Argos Instore (Channel 855...)"""
+    lines = []
+    
+    lines.append("🏪 <b>Argos Instore</b>")
+    lines.append("")
+    
+    title = clean_text(embed.get("title", "Item Restock"))
+    lines.append(f"📦 <b>{title}</b>")
+    lines.append("━━━━━━━━━━━━━━━")
+    lines.append("")
+    
+    fields = embed.get("fields", [])
+    stores = None
+    
+    for f in fields:
+        name = clean_text(f.get("name", "")).lower()
+        val = clean_text(f.get("value", ""))
+        if "stores" in name and "n/a" not in val.lower():
+            stores = val
+            
+    if stores:
+        lines.append(f"📍 <b>Availability:</b>")
+        lines.append(f"{stores}")
+        lines.append("")
+    
+    return lines, []
+
+def _format_restocks_currys(msg_data: Dict, embed: Dict) -> Tuple[List[str], List[List[InlineKeyboardButton]]]:
+    """Formatter for Online Restocks / Currys (Channel 864...)"""
+    lines = []
+    
+    # This channel puts "Product Info" with "Just Restocked At..."
+    fields = embed.get("fields", [])
+    prod_info = ""
+    resell = ""
+    price = ""
+    
+    for f in fields:
+        name = clean_text(f.get("name", "")).lower()
+        val = clean_text(f.get("value", ""))
+        if "product info" in name: prod_info = val
+        if "resell" in name and "n/a" not in val.lower(): resell = val
+        if "price" in name and "n/a" not in val.lower(): price = val
+        
+    # Extract site from product info if possible
+    site = "Online Restocks"
+    if "just restocked at" in prod_info.lower():
+        try:
+            site = prod_info.lower().split("just restocked at")[-1].strip()
+            site = site.replace("**", "").strip()
+        except: pass
+        
+    lines.append(f"⚡ <b>{site.upper()}</b>")
+    lines.append("")
+    
+    title = clean_text(embed.get("title", "Product"))
+    lines.append(f"📦 <b>{title}</b>")
+    lines.append("━━━━━━━━━━━━━━━")
+    lines.append("")
+    
+    if price:
+        lines.append(f"💰 <b>Price:</b> {price}")
+    if resell:
+        lines.append(f"📈 <b>Resell/Profit:</b> {resell}")
+        
+    lines.append("")
+    
+    return lines, []
+
 def format_telegram_message(msg_data: Dict) -> Tuple[str, List[str], Optional[InlineKeyboardMarkup]]:
     """
-    PROFESSIONAL formatter - converts Discord embed to rich Telegram message.
-    
-    Returns:
-        (text, image_urls, keyboard)
+    Dispatcher for channel-specific formatting with Fallback to Generic.
     """
     raw = msg_data.get("raw_data", {})
     embed = raw.get("embed")
-    author = raw.get("author", {})
+    # author = raw.get("author", {}) # Unused
     plain_content = msg_data.get("content", "")
+    channel_id = str(msg_data.get("channel_id", ""))
     
-    # Parse the tag line for extra info
+    # Parse tag info just in case
     tag_info = parse_tag_line(plain_content) if plain_content else {}
     
     lines = []
+    custom_buttons = []
     
-    # === EMBED CONTENT ===
-    
+    # === DISPATCHER ===
     if embed:
-        # RETAILER/SOURCE (from embed author or tag)
-        retailer = None
-        if embed.get("author"):
-            retailer = clean_text(embed["author"].get("name"))
-        elif tag_info.get("brand"):
-            retailer = clean_text(tag_info["brand"])
-        
-        if retailer:
-            lines.append(f"🏪 <b>{retailer}</b>")
+        if channel_id == CHANNEL_COLLECTORS:
+            l, b = _format_collectors_amazon(msg_data, embed)
+            lines.extend(l)
+            custom_buttons.extend(b)
+        elif channel_id == CHANNEL_ARGOS:
+            l, b = _format_argos(msg_data, embed)
+            lines.extend(l)
+            custom_buttons.extend(b)
+        elif channel_id == CHANNEL_RESTOCKS:
+            l, b = _format_restocks_currys(msg_data, embed)
+            lines.extend(l)
+            custom_buttons.extend(b)
+        else:
+            # === FALLBACK/GENERIC FORMATTER (Original Logic Refined) ===
+            # RETAILER/SOURCE
+            retailer = None
+            if embed.get("author"):
+                retailer = clean_text(embed["author"].get("name"))
+            elif tag_info.get("brand"):
+                retailer = clean_text(tag_info["brand"])
+            
+            if retailer and "unknown" not in retailer.lower():
+                lines.append(f"🏪 <b>{retailer}</b>")
+                lines.append("")
+            
+            # TITLE
+            title = clean_text(embed.get("title") or tag_info.get("product_code") or "Product Alert")
+            if tag_info.get("region"): title = f"[{tag_info['region']}] {title}"
+            
+            lines.append(f"📦 <b>{title}</b>")
+            lines.append("━━━━━━━━━━━━━━━")
+            lines.append("")
+            
+            # DESC
+            if embed.get("description"):
+                desc = clean_text(embed["description"])[:400]
+                if len(clean_text(embed["description"])) > 400: desc += "..."
+                lines.append(desc)
+                lines.append("")
+            
+            # FIELDS
+            seen_values = set()
+            if embed.get("fields"):
+                for field in embed["fields"]:
+                    name = clean_text(field.get("name", ""))
+                    value = clean_text(field.get("value", ""))
+                    
+                    if name and value and not any(kw in name.lower() for kw in ['link', 'atc', 'qt']):
+                        # Skip N/A values
+                        if "n/a" in value.lower(): continue
+
+                        if value in seen_values: continue
+                        seen_values.add(value)
+                        
+                        # Smart emoji mapping
+                        if "status" in name.lower() or "stock" in name.lower(): icon = "✅"
+                        elif "price" in name.lower() or "cost" in name.lower(): icon = "💰"
+                        elif "resell" in name.lower(): icon = "📈"
+                        elif "member" in name.lower(): icon = "👥"
+                        elif "store" in name.lower() or "shop" in name.lower(): icon = "🏪"
+                        elif "size" in name.lower(): icon = "📏"
+                        elif "product" in name.lower(): icon = "📦"
+                        else: icon = "•"
+                        
+                        if "price" in name.lower():
+                            lines.append(f"{icon} <b>{name}:</b> <b>{value}</b>")
+                        else:
+                            lines.append(f"{icon} <b>{name}:</b> {value}")
             lines.append("")
         
-        # PRODUCT TITLE (prioritize embed title over tag)
-        title = clean_text(embed.get("title") or tag_info.get("product_code") or "Product Alert")
-        
-        # Add region if available
-        if tag_info.get("region"):
-            title = f"[{tag_info['region']}] {title}"
-        
-        lines.append(f"📦 <b>{title}</b>")
-        lines.append("━━━━━━━━━━━━━━━")
-        lines.append("")
-        
-        # DESCRIPTION (truncated for readability)
-        if embed.get("description"):
-            desc = clean_text(embed["description"])[:400]
-            if len(clean_text(embed["description"])) > 400:
-                desc += "..."
-            lines.append(desc)
-            lines.append("")
-        
-        # FIELDS (Status, Price, Stock info) - EXCLUDE LINK FIELDS and DUPLICATES
-        seen_values = set()
-        if embed.get("fields"):
-            for field in embed["fields"]:
-                name = clean_text(field.get("name", ""))
-                value = clean_text(field.get("value", ""))
-                
-                # Skip link-related fields
-                # Skip duplicates and empty values
-                if name and value and not any(kw in name.lower() for kw in ['link', 'atc', 'qt']):
-                    # Skip if we've already shown this exact value
-                    if value in seen_values:
-                        continue
-                    seen_values.add(value)
-                    
-                    # Smart emoji mapping
-                    if "status" in name.lower() or "stock" in name.lower():
-                        icon = "✅"
-                    elif "price" in name.lower() or "cost" in name.lower():
-                        icon = "💰"
-                    elif "resell" in name.lower():
-                        icon = "📈"
-                    elif "member" in name.lower():
-                        icon = "👥"
-                    elif "store" in name.lower() or "shop" in name.lower():
-                        icon = "🏪"
-                    elif "size" in name.lower():
-                        icon = "📏"
-                    elif "product" in name.lower():
-                        icon = "📦"
-                    else:
-                        icon = "•"
-                    
-                    # Format value for better readability
-                    if "price" in name.lower():
-                        lines.append(f"{icon} <b>{name}:</b> <b>{value}</b>")
-                    else:
-                        lines.append(f"{icon} <b>{name}:</b> {value}")
-        
-        lines.append("")
-        
-        # FOOTER (timestamp) - REMOVE IF CONTAINS CCN/MONITOR INFO
+        # FOOTER (Common)
         footer = embed.get("footer")
         if footer and "ccn" not in footer.lower() and "monitor" not in footer.lower():
             lines.append(f"⏰ {footer}")
         else:
-            # Use scraped_at only if footer is empty/monitor-related
             scraped_time = parse_iso_datetime(msg_data.get("scraped_at", datetime.utcnow().isoformat()))
             lines.append(f"⏰ {scraped_time.strftime('%H:%M UTC')}")
-    
+            
     else:
-        # FALLBACK: No embed, use plain content
+        # HUMAN MESSAGE FALLBACK (Refined)
         if plain_content:
-            # Show parsed tag info nicely
-            if tag_info.get("product_code"):
-                lines.append(f"📦 <b>{clean_text(tag_info['product_code'])}</b>")
-            if tag_info.get("brand"):
-                lines.append(f"🏪 {clean_text(tag_info['brand'])}")
-            if tag_info.get("action"):
-                lines.append(f"ℹ️ {clean_text(tag_info['action'])}")
+            # Don't show generic title if content is short/simple
+            if tag_info.get("product_code"): lines.append(f"📦 <b>{clean_text(tag_info['product_code'])}</b>")
             
-            lines.append("")
-            lines.append(clean_text(plain_content)[:800])
-            
+            # Clean up content
+            content_display = clean_text(plain_content)
+            # If content starts with "Restocks |", bold it or make it a header
+            if content_display.lower().startswith("restocks |"):
+                parts = content_display.split("|")
+                if len(parts) > 1:
+                    header = parts[0].strip()
+                    body = " | ".join(parts[1:]).strip()
+                    lines.append(f"⚡ <b>{header}</b>")
+                    lines.append("")
+                    lines.append(body)
+                else:
+                    lines.append(content_display)
+            else:
+                 lines.append(content_display[:800])
+
             scraped_time = parse_iso_datetime(msg_data.get("scraped_at", datetime.utcnow().isoformat()))
             lines.append("")
             lines.append(f"⏰ {scraped_time.strftime('%H:%M:%S UTC')}")
@@ -511,22 +630,16 @@ def format_telegram_message(msg_data: Dict) -> Tuple[str, List[str], Optional[In
     # === IMAGE EXTRACTION ===
     images = []
     if embed:
-        # Prioritize main images over thumbnail
-        if embed.get("images"):
-            images.extend(embed["images"][:3])  # Max 3 images
-        elif embed.get("thumbnail"):
-            images.append(embed["thumbnail"])
+        if embed.get("images"): images.extend(embed["images"][:3])
+        elif embed.get("thumbnail"): images.append(embed["thumbnail"])
     
-    # === BUTTON CREATION ===
+    # === BUTTON CREATION (GENERIC + CUSTOM) ===
     keyboard = []
     
+    # Logic for button creation same as before (extracting from fields/links)
     if embed and embed.get("links"):
         all_links = embed["links"]
-        
-        # Track URLs we've already added
         seen_urls = set()
-        
-        # Organize links by priority and field
         ebay_links = []
         fba_links = []
         atc_links = []
@@ -539,15 +652,9 @@ def format_telegram_message(msg_data: Dict) -> Tuple[str, List[str], Optional[In
             link_text = link.get('text', 'Link')
             field = link.get('field', '').lower()
             
-            # Skip empty URLs and invalid URLs
-            if not url or not url.startswith('http'):
-                continue
+            if not url or not url.startswith('http'): continue
+            if url in seen_urls: continue
             
-            # Skip if we've already added this exact URL
-            if url in seen_urls:
-                continue
-            
-            # Categorize by field first
             if 'atc' in field or 'qt' in field:
                 atc_links.append({'text': link_text, 'url': url, 'field': field})
                 seen_urls.add(url)
@@ -633,6 +740,10 @@ def format_telegram_message(msg_data: Dict) -> Tuple[str, List[str], Optional[In
             if row:
                 keyboard.append(row)
     
+    # Add custom buttons if any
+    if custom_buttons:
+        keyboard.extend(custom_buttons)
+    
     return text, images, InlineKeyboardMarkup(keyboard) if keyboard else None
 
 
@@ -642,28 +753,41 @@ def is_duplicate_source(msg_data: Dict) -> bool:
     These are filtered out to avoid duplicate alerts.
     """
     raw = msg_data.get("raw_data", {})
-    embed = raw.get("embed", {})
+    embed = raw.get("embed") or {}
     plain_content = msg_data.get("content", "")
     
     # Check author name
-    author_name = (raw.get("author", {}).get("name") or "").lower()
-    if "profitable pinger" in author_name:
+    author_name = (raw.get("author", {}) or {}).get("name", "")
+    if author_name and "profitable pinger" in author_name.lower():
         return True
     
-    # Check embed author
-    embed_author = (embed.get("author", {}) or {}).get("name") or ""
-    if "profitable pinger" in embed_author.lower():
-        return True
+    # Check embed author (only if embed exists)
+    if embed:
+        embed_author = (embed.get("author") or {}).get("name", "")
+        if embed_author and "profitable pinger" in embed_author.lower():
+            return True
+        
+        # Check footer (bot signature)
+        footer = embed.get("footer", "")
+        if footer and "profitable pinger" in footer.lower():
+            return True
     
-    # Check footer (bot signature)
-    footer = (embed.get("footer") or "").lower()
-    if "profitable pinger" in footer:
-        return True
-    
-    # Check plain content
-    if "profitable pinger" in plain_content.lower():
-        return True
-    
+    # Check all fields in embed
+    if embed and embed.get("fields"):
+        for field in embed["fields"]:
+            val = (field.get("value") or "").lower()
+            name = (field.get("name") or "").lower()
+            if "profitable pinger" in val or "profitable pinger" in name:
+                return True
+                
+    # Check title and description
+    if embed:
+        title = (embed.get("title") or "").lower()
+        desc = (embed.get("description") or "").lower()
+        if "profitable pinger" in title or "profitable pinger" in desc:
+            return True
+
+
     return False
 
 
@@ -687,6 +811,88 @@ def create_menu_with_back(buttons: List[List[InlineKeyboardButton]], back_to: st
 
 
 # --- COMMAND HANDLERS ---
+
+async def test_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Test command to replay recent N messages.
+    Usage: /test [N] (default 1)
+    """
+    user_id = str(update.effective_user.id)
+    if user_id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ Admin only.")
+        return
+
+    try:
+        count = 1
+        if context.args:
+            count = int(context.args[0])
+            count = min(max(count, 1), 10)  # Clamp between 1 and 10
+    except ValueError:
+        await update.message.reply_text("usage: /test [number]")
+        return
+
+    await update.message.reply_text(f"🔍 Fetching last {count} messages...")
+    
+    # Fetch from Supabase directly
+    try:
+        headers = {"apikey": poller.supabase_key, "Authorization": f"Bearer {poller.supabase_key}"}
+        url = f"{poller.supabase_url}/rest/v1/discord_messages"
+        params = {
+            "select": "*",
+            "order": "scraped_at.desc",
+            "limit": count
+        }
+        
+        res = requests.get(url, headers=headers, params=params, timeout=10)
+        if res.status_code != 200:
+            await update.message.reply_text(f"❌ API Error: {res.status_code}")
+            return
+            
+        messages = res.json()
+        if not messages:
+            await update.message.reply_text("⚠️ No messages found in DB.")
+            return
+
+        # Reverse to show oldest first behavior? 
+        # Actually usually nice to see latest, but broadcasting sends older first.
+        # Let's send in the order fetched (descending) or reverse for chronological replay.
+        # Let's do reverse to mimic "stream"
+        messages.reverse() 
+        
+        for msg in messages:
+            text, images, keyboard = format_telegram_message(msg)
+            
+            # Send (Admin only)
+            if images:
+                try:
+                   await context.bot.send_photo(
+                        chat_id=user_id,
+                        photo=images[0],
+                        caption=text,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=keyboard
+                    )
+                except Exception as e:
+                     await context.bot.send_message(
+                        chat_id=user_id,
+                        text=f"Image failed: {text}",
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=keyboard
+                    )
+            else:
+                 await context.bot.send_message(
+                    chat_id=user_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=keyboard
+                )
+            await asyncio.sleep(0.5)
+
+        await update.message.reply_text("✅ Test complete.")
+
+    except Exception as e:
+        logger.error(f"Test error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Welcome message with main menu"""
@@ -1048,50 +1254,7 @@ async def _broadcast_job_inner(context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"   📊 Message {msg_idx + 1}: ✅ {sent_count} sent, ❌ {failed_count} failed")
 
 
-# 4. UPDATE run_bot() FUNCTION (find and update the job_queue section)
-def run_bot():
-    """Run bot with professional alert system"""
-    try:
-        if not TELEGRAM_TOKEN:
-            logger.error("❌ TELEGRAM_TOKEN not set!")
-            return
-        
-        logger.info("\n" + "=" * 80)
-        logger.info("🚀 TELEGRAM BOT INITIALIZATION")
-        logger.info("=" * 80)
-        logger.info(f"   Poll Interval: {POLL_INTERVAL} seconds")
-        logger.info(f"   Max Job Runtime: {MAX_JOB_RUNTIME} seconds")
-        
-        app = Application.builder().token(TELEGRAM_TOKEN).build()
-        
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CommandHandler("gen", gen_code))
-        app.add_handler(CallbackQueryHandler(button_handler))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        
-        if app.job_queue:
-            logger.info("   Adding broadcast job with overlap protection...")
-            app.job_queue.run_repeating(
-                broadcast_job, 
-                interval=POLL_INTERVAL, 
-                first=10  # Start after 10 seconds
-            )
-            logger.info(f"   ✅ Job queue running (poll every {POLL_INTERVAL}s, max runtime {MAX_JOB_RUNTIME}s)")
-        
-        active_count = len(sm.get_active_users())
-        total_count = len(sm.users)
-        logger.info(f"   📊 Users: {total_count} total, {active_count} active")
-        logger.info("=" * 80 + "\n")
-        
-        logger.info("📡 Starting polling loop...")
-        app.run_polling(allowed_updates=Update.ALL_TYPES, stop_signals=[])
-        
-    except KeyboardInterrupt:
-        logger.info("⚠️  Bot interrupted by user")
-    except Exception as e:
-        logger.error(f"❌ CRITICAL BOT ERROR: {e}")
-        logger.error(traceback.format_exc())
-
+# 4. UPDATE run_bot() FUNCTION
 def run_bot():
     """Run bot with professional alert system"""
     try:
@@ -1105,19 +1268,24 @@ def run_bot():
         logger.info(f"   Token: {TELEGRAM_TOKEN[:15]}...***{TELEGRAM_TOKEN[-5:]}")
         logger.info(f"   Admin ID: {ADMIN_USER_ID}")
         logger.info(f"   Poll Interval: {POLL_INTERVAL} seconds")
-        logger.info(f"   Users file: {USERS_FILE}")
-        logger.info(f"   Codes file: {CODES_FILE}")
+        logger.info(f"   Max Runtime: {MAX_JOB_RUNTIME} seconds")
         
         app = Application.builder().token(TELEGRAM_TOKEN).build()
         
+        # Command Handlers
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("gen", gen_code))
+        app.add_handler(CommandHandler("test", test_alerts))  # New Test Command
         app.add_handler(CallbackQueryHandler(button_handler))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
         if app.job_queue:
-            logger.info("   Adding broadcast job...")
-            app.job_queue.run_repeating(broadcast_job, interval=POLL_INTERVAL, first=5)
+            logger.info("   Adding broadcast job with overlap protection...")
+            app.job_queue.run_repeating(
+                broadcast_job, 
+                interval=POLL_INTERVAL, 
+                first=10
+            )
             logger.info(f"   ✅ Job queue running (poll every {POLL_INTERVAL}s)")
         
         # Show active users count on startup

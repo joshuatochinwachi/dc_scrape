@@ -512,7 +512,7 @@ async def extract_embed_data(message_element):
         except: pass
         
         try:
-            author_elem = embed.locator('div[class*="embedAuthor"] a').first
+            author_elem = embed.locator('[class*="embedAuthor"] a, [class*="embedAuthor"] span, [class*="embedAuthorName"]').first
             if await author_elem.count() > 0:
                 author_name = await author_elem.inner_text()
                 author_url = await author_elem.get_attribute('href')
@@ -522,7 +522,7 @@ async def extract_embed_data(message_element):
         except: pass
         
         try:
-            title_elem = embed.locator('div[class*="embedTitle"] a').first
+            title_elem = embed.locator('[class*="embedTitle"] a, [class*="embedTitle"]').first
             if await title_elem.count() > 0:
                 title_text = await title_elem.inner_text()
                 title_url = await title_elem.get_attribute('href')
@@ -532,24 +532,40 @@ async def extract_embed_data(message_element):
         except: pass
         
         try:
-            field_containers = embed.locator('div[class*="embedField"]')
+            field_containers = embed.locator('[class*="embedField"]')
             field_count = await field_containers.count()
             
             for i in range(field_count):
                 field = field_containers.nth(i)
-                field_name_elem = field.locator('div[class*="embedFieldName"]').first
+                field_name_elem = field.locator('[class*="embedFieldName"]').first
                 field_name = ""
                 if await field_name_elem.count() > 0:
                     field_name = clean_text(await field_name_elem.inner_text())
                 
-                field_value_elem = field.locator('div[class*="embedFieldValue"]').first
                 field_value = ""
+                field_value_elem = field.locator('[class*="embedFieldValue"]').first
                 if await field_value_elem.count() > 0:
-                    field_value = clean_text(await field_value_elem.inner_text())
+                    # Try to preserve links as Markdown [Text](URL)
+                    # We execute JS to replace <a> tags with markdown text
+                    try:
+                        field_value = await field_value_elem.evaluate("""element => {
+                            let clone = element.cloneNode(true);
+                            clone.querySelectorAll('a').forEach(a => {
+                                if (a.href) {
+                                    a.textContent = `[${a.textContent}](${a.href})`;
+                                }
+                            });
+                            return clone.innerText;
+                        }""")
+                    except:
+                        field_value = await field_value_elem.inner_text()
+                    
+                    field_value = clean_text(field_value)
                 
                 if field_name or field_value:
                     embed_data["fields"].append({"name": field_name, "value": field_value})
                     
+                    # (Optional: we still keep the separate links list for fallback/buttons if needed)
                     try:
                         value_links = field_value_elem.locator('a[href]')
                         link_count = await value_links.count()
@@ -567,7 +583,10 @@ async def extract_embed_data(message_element):
         except: pass
         
         try:
-            thumb_elem = embed.locator('[class*="embedThumbnail"] img').first
+            thumb_elem = embed.locator('img[class*="embedThumbnail"]').first
+            if await thumb_elem.count() == 0:
+                thumb_elem = embed.locator('[class*="embedThumbnail"] img').first
+            
             if await thumb_elem.count() > 0:
                 thumb_src = await thumb_elem.get_attribute('src')
                 if thumb_src:
@@ -575,7 +594,7 @@ async def extract_embed_data(message_element):
         except: pass
         
         try:
-            footer_elem = embed.locator('div[class*="embedFooter"]')
+            footer_elem = embed.locator('[class*="embedFooter"]').first
             if await footer_elem.count() > 0:
                 embed_data["footer"] = clean_text(await footer_elem.inner_text())
         except: pass
@@ -586,14 +605,31 @@ async def extract_embed_data(message_element):
         return None
 
 async def extract_message_author(message_element):
-    """Extract author info"""
+    """Extract author info with robust fallbacks"""
     try:
-        author_elem = message_element.locator('h3[class*="header"] span[class*="username"]').first
+        # Priority 1: ID-based (Most specific, confirmed in inspection)
+        author_elem = message_element.locator('[id^="message-username-"]').first
+        
+        # Priority 2: Standard Class-based
+        if await author_elem.count() == 0:
+            author_elem = message_element.locator('span[class*="username"]').first
+            
+        # Priority 3: Header-based
+        if await author_elem.count() == 0:
+            author_elem = message_element.locator('h3 span').first
+
         if await author_elem.count() > 0:
+            # Get text from the first visible part (often the username span inside the wrapper)
             author_name = await author_elem.inner_text()
-            is_bot = await message_element.locator('span[class*="botTag"]').count() > 0
+            
+            is_bot = await message_element.locator('[class*="botTag"]').count() > 0
+            
+            # Avatar fallback
             avatar_elem = message_element.locator('img[class*="avatar"]').first
-            avatar_url = await avatar_elem.get_attribute('src') if await avatar_elem.count() > 0 else None
+            avatar_url = None
+            if await avatar_elem.count() > 0:
+                avatar_url = await avatar_elem.get_attribute('src')
+                
             return {"name": clean_text(author_name), "is_bot": is_bot, "avatar": avatar_url}
     except: pass
     return {"name": "Unknown", "is_bot": False, "avatar": None}
