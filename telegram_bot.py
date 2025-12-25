@@ -318,13 +318,13 @@ class MessagePoller:
     def poll_new_messages(self):
         try:
             if not self.last_scraped_at: 
-                self.last_scraped_at = (datetime.utcnow() - timedelta(minutes=5)).isoformat()
+                self.last_scraped_at = (datetime.utcnow() - timedelta(minutes=45)).isoformat()
             
             headers = {"apikey": self.supabase_key, "Authorization": f"Bearer {self.supabase_key}"}
             url = f"{self.supabase_url}/rest/v1/discord_messages"
             params = {"scraped_at": f"gt.{self.last_scraped_at}", "order": "scraped_at.asc"}
             
-            res = requests.get(url, headers=headers, params=params, timeout=10)
+            res = requests.get(url, headers=headers, params=params, timeout=45)
             if res.status_code != 200: return []
             
             messages = res.json()
