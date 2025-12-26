@@ -668,6 +668,48 @@ def clean_text(text: str) -> str:
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
+def format_price_value(value: str) -> str:
+    """
+    Format price value for Telegram:
+    1. Converts Discord ~~text~~ to HTML <s>text</s>
+    2. Ensures numeric prices have £ prefix if no currency symbol present
+    3. Retains formatting for discount strings like '~~£2.95~~ (-32%) £1.99'
+    """
+    if not value: return value
+    
+    # First, handle strikethrough: ~~text~~ -> <s>text</s>
+    # We do this first so we don't accidentally add £ inside the ~~ markers in a way that breaks them
+    value = re.sub(r'~~([^~]+)~~', r'<s>\1</s>', value)
+    
+    # Helper to add currency to a single price-like segment
+    def add_currency(match):
+        price = match.group(0)
+        # If it doesn't have a currency symbol, add £
+        if not any(c in price for c in ['£', '$', '€']):
+            return f"£{price}"
+        return price
+
+    # Pattern for numbers that look like prices (e.g., 2.95, 10, 1,999.00)
+    # We look for numbers possibly preceded by a currency symbol
+    price_pattern = r'[£$€]?\d+(?:[.,]\d{2})?'
+    
+    # We want to be careful not to double-add or add to percentages
+    # So we'll find all price-like things and process them
+    # But wait, percents like (-32%) shouldn't be touched.
+    
+    parts = re.split(r'(\([^)]+\))', value) # Split by parentheses to protect percentages
+    new_parts = []
+    for part in parts:
+        if part.startswith('(') and part.endswith(')'):
+            new_parts.append(part)
+        else:
+            # Add currency to standalone numbers that don't have it
+            # We use a negative lookahead to avoid matching numbers followed by %
+            subbed = re.sub(r'(?<![£$€\d])\d+(?:\.\d{2})?(?!\s*%)', add_currency, part)
+            new_parts.append(subbed)
+            
+    return "".join(new_parts)
+
 
 # --- CHANNEL SPECIFIC FORMATTERS ---
 
@@ -720,9 +762,7 @@ def _format_collectors_amazon(msg_data: Dict, embed: Dict) -> Tuple[List[str], L
         
         # Add currency symbol and bold prices
         if "price" in name_lower:
-            # Add £ if no currency symbol present
-            if not any(c in val for c in ['£', '$', '€']):
-                val = f"£{val}"
+            val = format_price_value(val)
             lines.append(f"{icon} <b>{name}:</b> <b>{val}</b>")
         else:
             lines.append(f"{icon} <b>{name}:</b> {val}")
@@ -766,8 +806,7 @@ def _format_argos(msg_data: Dict, embed: Dict) -> Tuple[List[str], List[List[Inl
         
         # Add currency to prices
         if "price" in name_lower and val:
-            if not any(c in val for c in ['£', '$', '€']):
-                val = f"£{val}"
+            val = format_price_value(val)
         
         lines.append(f"{icon} <b>{name}:</b> {val}")
     
@@ -827,9 +866,7 @@ def _format_restocks_currys(msg_data: Dict, embed: Dict) -> Tuple[List[str], Lis
         else: icon = "•"
         
         if "price" in name_lower:
-            # Add £ if no currency symbol
-            if not any(c in val for c in ['£', '$', '€']):
-                val = f"£{val}"
+            val = format_price_value(val)
             lines.append(f"{icon} <b>{name}:</b> <b>{val}</b>")
         else:
             lines.append(f"{icon} <b>{name}:</b> {val}")
@@ -936,9 +973,7 @@ def format_telegram_message(msg_data: Dict) -> Tuple[str, List[str], Optional[In
                             icon = "•"
                         
                         if "price" in name_lower:
-                            # Add £ if no currency symbol
-                            if not any(c in value for c in ['£', '$', '€']):
-                                value = f"£{value}"
+                            value = format_price_value(value)
                             lines.append(f"{icon} <b>{name}:</b> <b>{value}</b>")
                         else:
                             lines.append(f"{icon} <b>{name}:</b> {value}")

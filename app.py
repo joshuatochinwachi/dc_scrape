@@ -550,6 +550,21 @@ async def extract_embed_data(message_element):
                     try:
                         field_value = await field_value_elem.evaluate("""element => {
                             let clone = element.cloneNode(true);
+                            
+                            // Replace <s> and <strike> with ~~text~~
+                            clone.querySelectorAll('s, strike').forEach(s => {
+                                s.textContent = `~~${s.textContent}~~`;
+                            });
+                            
+                            // Check for elements with line-through style
+                            clone.querySelectorAll('*').forEach(el => {
+                                let style = window.getComputedStyle(el);
+                                if (style.textDecoration && style.textDecoration.includes('line-through') && !el.textContent.includes('~~')) {
+                                    el.textContent = `~~${el.textContent}~~`;
+                                }
+                            });
+
+                            // Replace <a> tags with markdown [Text](URL)
                             clone.querySelectorAll('a').forEach(a => {
                                 if (a.href) {
                                     a.textContent = `[${a.textContent}](${a.href})`;

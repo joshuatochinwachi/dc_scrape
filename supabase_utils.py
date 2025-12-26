@@ -55,10 +55,7 @@ def sanitize_text(text: str, max_length: int = 2000) -> str:
     # Step 2: Remove ALL control characters (0-31) and DEL (127)
     text = ''.join(char for char in text if ord(char) >= 32 and ord(char) != 127)
     
-    # Step 3: Remove special unicode that might cause issues
-    text = text.encode('ascii', errors='ignore').decode('ascii')
-    
-    # Step 4: Collapse whitespace
+    # Step 3: Collapse whitespace
     text = ' '.join(text.split())
     
     # Step 5: Limit length
