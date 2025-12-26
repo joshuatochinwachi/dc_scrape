@@ -450,6 +450,7 @@ class MessagePoller:
         self.cursor_file = "bot_cursor.json"
         self.local_path = f"data/{self.cursor_file}"
         self.remote_path = f"discord_josh/{self.cursor_file}"
+        self.time_based_signatures = {}  # {sig_hash: timestamp_iso}
         self._init_cursor()
 
     def _init_cursor(self):
@@ -462,6 +463,8 @@ class MessagePoller:
                 self.sent_ids = set(loaded.get("sent_ids", loaded.get("sent_hashes", [])))
                 # Load persistent signatures
                 self.recent_signatures = loaded.get("recent_signatures", [])
+                # Load time-based signatures
+                self.time_based_signatures = loaded.get("time_based_signatures", {})
             if not self.last_scraped_at: 
                 self.last_scraped_at = (datetime.utcnow() - timedelta(hours=24)).isoformat()
         except:
@@ -472,8 +475,9 @@ class MessagePoller:
             with open(self.local_path, 'w') as f: 
                 json.dump({
                     "last_scraped_at": self.last_scraped_at,
-                    "sent_ids": list(self.sent_ids)[-1000:],
-                    "recent_signatures": self.recent_signatures
+                    "sent_ids": list(self.sent_ids)[-5000:],  # Increased to 5000 IDs
+                    "recent_signatures": self.recent_signatures[-20:], # Increased to last 20
+                    "time_based_signatures": self.time_based_signatures
                 }, f)
             supabase_utils.upload_file(self.local_path, SUPABASE_BUCKET, self.remote_path, debug=False)
         except: pass
@@ -485,31 +489,53 @@ class MessagePoller:
             embed = raw.get("embed") or {}
             content = msg.get("content", "")
             
-            # 1. Retailer
             retailer = ""
+            title = ""
+            price = ""
+            
+            # 1. Try Embed extraction
             if embed.get("author"):
                 retailer = embed["author"].get("name", "")
-            elif "Argos" in content:
-                retailer = "Argos Instore"
             
-            # 2. Title
             title = embed.get("title", "")
-            if not title and content:
-                # Try to extract from tag line
-                tag_info = parse_tag_line(content)
-                title = tag_info.get("product_code", "")
             
-            # 3. Price
-            price = ""
-            fields = embed.get("fields", [])
-            for f in fields:
-                name = (f.get("name") or "").lower()
+            # Extract price from embed fields
+            for field in embed.get("fields", []):
+                name = (field.get("name") or "").lower()
                 if "price" in name:
-                    price = f.get("value", "")
+                    price = field.get("value", "")
                     break
+            
+            # 2. FALLBACK: Parse plain text content if embed data missing
+            if not retailer or not title or not price:
+                # Pattern: "@Mention | Product Name | Retailer | Just restocked for £XX.XX"
+                if content and "|" in content:
+                    parts = [p.strip() for p in content.split("|")]
+                    if len(parts) >= 3:
+                        # parts[0] is usually @Mention, but sometimes it's the product
+                        # We'll use the logic that if we still need title/retailer, we try to grab them
+                        if not title and len(parts) > 1:
+                            title = parts[1]
+                        if not retailer and len(parts) > 2:
+                            retailer = parts[2]
+                        if not price:
+                            # Extract price from any part that matches a currency pattern
+                            # Search the whole content for the most likely price
+                            price_match = re.search(r'[£$€]\s*[\d,]+\.?\d*', content)
+                            if price_match:
+                                price = price_match.group(0)
+                
+            # Final fallback for Argos or other specific keywords if still empty
+            if not retailer and "Argos" in content:
+                retailer = "Argos Instore"
             
             # Create raw signature and hash it
             raw_sig = f"{retailer}|{title}|{price}".lower().strip()
+            
+            # If everything is still empty, use content hash or ID
+            if raw_sig == "||":
+                return hashlib.md5(content.encode()).hexdigest() if content else str(msg.get("id"))
+                
             import hashlib
             return hashlib.md5(raw_sig.encode()).hexdigest()
         except Exception as e:
@@ -529,42 +555,56 @@ class MessagePoller:
             if res.status_code != 200: return []
             
             messages = res.json()
+            now_iso = datetime.utcnow().isoformat()
+            now_dt = datetime.utcnow()
             
-            # Filter duplicates by message ID AND Content Signature (Last 3)
+            # Prune time-based signatures older than 10 minutes
+            pruned_sigs = {}
+            for s, ts in self.time_based_signatures.items():
+                if (now_dt - parse_iso_datetime(ts)) < timedelta(minutes=10):
+                    pruned_sigs[s] = ts
+            self.time_based_signatures = pruned_sigs
+
             new_messages = []
             for msg in messages:
                 msg_id = msg.get("id")
-                # 1. Discord ID Check (All-time)
-                if not msg_id or msg_id in self.sent_ids:
+                # LAYER 1: Discord ID Check (All-time tracking)
+                if not msg_id or str(msg_id) in self.sent_ids:
                     continue
                 
-                # 2. Content Signature Check (Sliding Window)
                 sig = self._get_content_signature(msg)
+                
+                # LAYER 2: Content Signature (Sliding Window - last 20)
                 if sig in self.recent_signatures:
-                    logger.info(f"⏭️ Skipping duplicate content: {msg_id} (Signature: {sig})")
-                    # Still add ID to sent_ids so we don't re-poll, but don't add to new_messages
-                    self.sent_ids.add(msg_id)
+                    logger.info(f"⏭️ LAYER 2 BLOCK: Duplicate content window: {msg_id} (Sig: {sig})")
+                    self.sent_ids.add(str(msg_id))
+                    continue
+                
+                # LAYER 3: Time-Based Deduplication (10-minute window)
+                if sig in self.time_based_signatures:
+                    logger.info(f"⏭️ LAYER 3 BLOCK: Duplicate content within 10m: {msg_id} (Sig: {sig})")
+                    self.sent_ids.add(str(msg_id))
                     continue
 
+                # MESSAGE ACCEPTED - Add to tracking IMMEDIATELY
                 new_messages.append(msg)
-                self.sent_ids.add(msg_id)
+                self.sent_ids.add(str(msg_id))
+                self.recent_signatures.append(sig)
+                self.recent_signatures = self.recent_signatures[-20:] # Keep last 20
+                self.time_based_signatures[sig] = now_iso
             
+            if new_messages:
+                # Save cursor immediately after polling if new messages found
+                self._save_cursor()
+                
             return new_messages
         except Exception as e:
             logger.error(f"Poll error: {e}")
             return []
     
     def update_cursor(self, scraped_at: str, msg_data: Optional[Dict] = None):
-        """Update cursor to given scraped_at timestamp and track recent signatures"""
+        """Update cursor to given scraped_at timestamp"""
         self.last_scraped_at = scraped_at
-        
-        if msg_data:
-            sig = self._get_content_signature(msg_data)
-            if sig not in self.recent_signatures:
-                self.recent_signatures.append(sig)
-                # Keep only last 3
-                self.recent_signatures = self.recent_signatures[-3:]
-                
         self._save_cursor()
 
 

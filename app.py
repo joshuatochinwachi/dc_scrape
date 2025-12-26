@@ -910,11 +910,13 @@ async def async_archiver_logic():
                         debug_saved = False
                         for i in range(max(0, count - 10), count):
                             msg = messages.nth(i)
-                            raw_id = await msg.get_attribute('id') or await msg.get_attribute('data-list-item-id')
-                            if not raw_id: continue
+                            raw_id = await msg.get_attribute('id') or await msg.get_attribute('data-list-item-id') or ""
+                            # Discord snowflake IDs are 17-19 digits. Extract the final numeric segment.
+                            # Example: "chat-messages___chat-messages-1367813504786108526-1453954492323074244" -> "1453954492323074244"
+                            match = re.search(r'(\d{17,19})$', raw_id)
+                            msg_id = match.group(1) if match else raw_id.replace('chat-messages-', '').replace('message-', '')
                             
-                            msg_id = raw_id.replace('chat-messages-', '').replace('message-', '')
-                            if msg_id in current_ids: continue
+                            if not msg_id or msg_id in current_ids: continue
                             
                             if DEBUG_MODE and not debug_saved:
                                 await save_message_html_for_inspection(msg, msg_id)
