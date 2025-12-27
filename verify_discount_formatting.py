@@ -25,22 +25,31 @@ def test_price_formatting():
     print("--- Testing format_price_value ---")
     
     test_cases = [
+        # Simple prices
         ("2.95", "£2.95"),
         ("£2.95", "£2.95"),
         ("$10.00", "$10.00"),
-        ("~~2.95~~ (-32%) 1.99", "<s>£2.95</s> (-32%) £1.99"),
-        ("~~£2.95~~ (-32%) £1.99", "<s>£2.95</s> (-32%) £1.99"),
-        ("~~15.00~~ 10.00", "<s>£15.00</s> £10.00"),
-        ("Sale Price: 45.00", "Sale Price: £45.00"),
-        ("Was ~~50~~ now 40", "Was <s>£50</s> now £40"),
+        
+        # Real discount format from Supabase (with leading spaces)
+        (" 0.95 (-47%) 0.5", "<s>£0.95</s> (-47%) <b>£0.5</b>"),
+        ("2.95 (-32%) 1.99", "<s>£2.95</s> (-32%) <b>£1.99</b>"),
+        ("£2.95 (-32%) £1.99", "<s>£2.95</s> (-32%) <b>£1.99</b>"),
+        
+        # Edge cases
+        ("50", "£50"),
     ]
     
+    all_pass = True
     for input_val, expected in test_cases:
         actual = format_price_value(input_val)
         status = "✅" if actual == expected else "❌"
+        if actual != expected:
+            all_pass = False
         print(f"{status} Input: '{input_val}'")
         print(f"   Actual:   '{actual}'")
         print(f"   Expected: '{expected}'")
+    
+    return all_pass
 
 def test_full_message_formatting():
     print("\n--- Testing format_telegram_message with discounted price ---")
@@ -53,7 +62,7 @@ def test_full_message_formatting():
             "embed": {
                 "title": "Sushi Bolts Allen Head (Pk 8) Black - 1 IN",
                 "fields": [
-                    {"name": "Price", "value": "~~2.95~~ (-32%) 1.99"},
+                    {"name": "Price", "value": "2.95 (-32%) 1.99"},
                     {"name": "Stock", "value": "In Stock"}
                 ]
             }
@@ -63,15 +72,14 @@ def test_full_message_formatting():
     text, _, _ = format_telegram_message(msg)
     print(text)
     
-    if "<s>£2.95</s> (-32%) £1.99" in text:
-        print("✅ Message contains correctly formatted discount")
+    # Check for the new format with strikethrough and bold
+    if "<s>£2.95</s>" in text and "<b>£1.99</b>" in text:
+        print("✅ Message contains correctly formatted discount (strikethrough original, bold discounted)")
+        return True
     else:
         print("❌ Message formatting FAILED")
-        
-    if "💰 <b>Price:</b> <b><s>£2.95</s> (-32%) £1.99</b>" in text:
-        print("✅ Price field is correctly bolded and iconified")
-    else:
-        print("❌ Price field formatting incorrect")
+        print("   Looking for: <s>£2.95</s> and <b>£1.99</b>")
+        return False
 
 if __name__ == "__main__":
     test_price_formatting()

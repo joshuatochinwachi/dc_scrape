@@ -670,45 +670,73 @@ def clean_text(text: str) -> str:
 
 def format_price_value(value: str) -> str:
     """
-    Format price value for Telegram:
-    1. Converts Discord ~~text~~ to HTML <s>text</s>
-    2. Ensures numeric prices have £ prefix if no currency symbol present
-    3. Retains formatting for discount strings like '~~£2.95~~ (-32%) £1.99'
+    Format price value for Telegram with smart discount detection.
+    
+    Detects patterns like:
+    - '2.95 (-32%) 1.99' -> '<s>£2.95</s> (-32%) <b>£1.99</b>'
+    - '£2.95 (-32%) £1.99' -> '<s>£2.95</s> (-32%) <b>£1.99</b>'
+    - '~~2.95~~ 1.99' -> '<s>£2.95</s> <b>£1.99</b>'
+    - Simple prices like '5.99' -> '£5.99'
     """
-    if not value: return value
+    if not value: 
+        return value
     
-    # First, handle strikethrough: ~~text~~ -> <s>text</s>
-    # We do this first so we don't accidentally add £ inside the ~~ markers in a way that breaks them
-    value = re.sub(r'~~([^~]+)~~', r'<s>\1</s>', value)
+    # Strip leading/trailing whitespace
+    value = value.strip()
     
-    # Helper to add currency to a single price-like segment
-    def add_currency(match):
-        price = match.group(0)
-        # If it doesn't have a currency symbol, add £
-        if not any(c in price for c in ['£', '$', '€']):
-            return f"£{price}"
-        return price
-
-    # Pattern for numbers that look like prices (e.g., 2.95, 10, 1,999.00)
-    # We look for numbers possibly preceded by a currency symbol
-    price_pattern = r'[£$€]?\d+(?:[.,]\d{2})?'
+    # Helper to ensure currency symbol
+    def ensure_currency(price_str):
+        price_str = price_str.strip()
+        if price_str and not any(c in price_str for c in ['£', '$', '€']):
+            return f"£{price_str}"
+        return price_str
     
-    # We want to be careful not to double-add or add to percentages
-    # So we'll find all price-like things and process them
-    # But wait, percents like (-32%) shouldn't be touched.
+    # Pattern 1: Detect discount format "ORIGINAL_PRICE (PERCENT%) DISCOUNTED_PRICE"
+    # Matches: "2.95 (-32%) 1.99", "£2.95 (-32%) £1.99", "0.95 (-47%) 0.5"
+    discount_pattern = r'([£$€]?\d+(?:[.,]\d{1,2})?)[\s]*\((-?\d+%?)\)[\s]*([£$€]?\d+(?:[.,]\d{1,2})?)'
     
-    parts = re.split(r'(\([^)]+\))', value) # Split by parentheses to protect percentages
-    new_parts = []
-    for part in parts:
-        if part.startswith('(') and part.endswith(')'):
-            new_parts.append(part)
-        else:
-            # Add currency to standalone numbers that don't have it
-            # We use a negative lookahead to avoid matching numbers followed by %
-            subbed = re.sub(r'(?<![£$€\d])\d+(?:\.\d{2})?(?!\s*%)', add_currency, part)
-            new_parts.append(subbed)
-            
-    return "".join(new_parts)
+    match = re.search(discount_pattern, value)
+    if match:
+        original_price = ensure_currency(match.group(1))
+        discount_percent = match.group(2)
+        # Ensure percent has % if it doesn't
+        if '%' not in discount_percent:
+            discount_percent = f"{discount_percent}%"
+        discounted_price = ensure_currency(match.group(3))
+        
+        # Format: strikethrough original, bold discounted
+        return f"<s>{original_price}</s> ({discount_percent}) <b>{discounted_price}</b>"
+    
+    # Pattern 2: Discord markdown strikethrough ~~text~~
+    if '~~' in value:
+        # Convert ~~text~~ to <s>text</s>
+        value = re.sub(r'~~([^~]+)~~', r'<s>\1</s>', value)
+        
+        # Find any remaining prices and ensure they have currency + bold the last one
+        prices = re.findall(r'[£$€]?\d+(?:[.,]\d{1,2})?', value)
+        if prices:
+            last_price = prices[-1]
+            # Bold the discounted price (last price not in strikethrough)
+            if f"<s>{last_price}</s>" not in value and f"<s>£{last_price}</s>" not in value:
+                value = value.replace(last_price, f"<b>{ensure_currency(last_price)}</b>", 1)
+    
+    # Pattern 3: Simple price without discount - just ensure currency symbol
+    # Only add currency if it's a simple standalone price
+    simple_price_pattern = r'^[£$€]?\d+(?:[.,]\d{1,2})?$'
+    if re.match(simple_price_pattern, value.strip()):
+        return ensure_currency(value.strip())
+    
+    # Fallback: ensure all standalone numeric prices have currency symbols
+    def add_currency_to_prices(text):
+        def replacer(m):
+            price = m.group(0)
+            if not any(c in price for c in ['£', '$', '€']):
+                return f"£{price}"
+            return price
+        # Match prices not already in <s> tags or preceded by currency
+        return re.sub(r'(?<![£$€\d<])\d+(?:\.\d{1,2})?(?![%\d>])', replacer, text)
+    
+    return add_currency_to_prices(value)
 
 
 # --- CHANNEL SPECIFIC FORMATTERS ---
