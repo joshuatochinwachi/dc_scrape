@@ -38,7 +38,8 @@ def test_price_formatting():
         
         # Edge cases
         ("50", "£50"),
-        ("21.99 GBP", "£21.99 GBP"),  # Already has currency context
+        ("21.99 GBP", "21.99 GBP"),  # Has currency label, don't add £
+        ("154.44 GBP (208.52 USD)", "154.44 GBP (208.52 USD)"),  # Both have currency labels
     ]
     
     all_pass = True

@@ -728,9 +728,18 @@ def format_price_value(value: str) -> str:
     
     # Fallback: ensure all standalone numeric prices have currency symbols
     # But don't match numbers that are part of a decimal (like "99" in "2.99")
+    # And don't add £ to numbers that are followed by currency codes like USD, EUR
     def add_currency_to_prices(text):
         def replacer(m):
             price = m.group(0)
+            # Check what comes after this match in the original text
+            end_pos = m.end()
+            suffix = text[end_pos:end_pos+10].strip().upper()
+            
+            # Don't add £ if followed by currency code (it already has a denomination)
+            if suffix.startswith(('USD', 'EUR', 'GBP', 'CAD', 'AUD')):
+                return price  # Leave as-is, it has a currency label
+            
             if not any(c in price for c in ['£', '$', '€']):
                 return f"£{price}"
             return price
