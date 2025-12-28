@@ -727,14 +727,16 @@ def format_price_value(value: str) -> str:
         return ensure_currency(value.strip())
     
     # Fallback: ensure all standalone numeric prices have currency symbols
+    # But don't match numbers that are part of a decimal (like "99" in "2.99")
     def add_currency_to_prices(text):
         def replacer(m):
             price = m.group(0)
             if not any(c in price for c in ['£', '$', '€']):
                 return f"£{price}"
             return price
-        # Match prices not already in <s> tags or preceded by currency
-        return re.sub(r'(?<![£$€\d<])\d+(?:\.\d{1,2})?(?![%\d>])', replacer, text)
+        # Match complete prices only - must not be preceded by decimal point, currency, or digit
+        # and must not be followed by % or digit (unless it's the decimal portion)
+        return re.sub(r'(?<![£$€\d.])\d+(?:\.\d{1,2})?(?![%\d])', replacer, text)
     
     return add_currency_to_prices(value)
 

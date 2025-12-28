@@ -30,13 +30,15 @@ def test_price_formatting():
         ("£2.95", "£2.95"),
         ("$10.00", "$10.00"),
         
-        # Real discount format from Supabase (with leading spaces)
+        # Discount patterns - these should NOT produce £2.£99
+        ("3.95 (-24%) 2.99", "<s>£3.95</s> (-24%) <b>£2.99</b>"),
         (" 0.95 (-47%) 0.5", "<s>£0.95</s> (-47%) <b>£0.5</b>"),
         ("2.95 (-32%) 1.99", "<s>£2.95</s> (-32%) <b>£1.99</b>"),
         ("£2.95 (-32%) £1.99", "<s>£2.95</s> (-32%) <b>£1.99</b>"),
         
         # Edge cases
         ("50", "£50"),
+        ("21.99 GBP", "£21.99 GBP"),  # Already has currency context
     ]
     
     all_pass = True
@@ -48,6 +50,8 @@ def test_price_formatting():
         print(f"{status} Input: '{input_val}'")
         print(f"   Actual:   '{actual}'")
         print(f"   Expected: '{expected}'")
+        if actual != expected:
+            print(f"   ⚠️  MISMATCH!")
     
     return all_pass
 
