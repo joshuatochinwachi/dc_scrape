@@ -1,105 +1,134 @@
 Fetching last 50 messages from https://ldraroaloinsesjoayxc.supabase.co/rest/v1/discord_messages...
 
-✅ Found message with images! ID: 1458784594957697121
+✅ Found message with images! ID: 1458796591874965617
 Images array found in JSON:
- - https://images-ext-1.discordapp.net/external/qUoo6m-VPmSseo3A3czy64HQsj-ftLppTvsW4GIcqCg/https/m.media-amazon.com/images/I/511nSF7YpmL._SL160_.jpg?format=webp
+ - https://images-ext-1.discordapp.net/external/9vNSEkfkTXktdvJRd7FgvN0WtZCOhQRp8QeBK9h_0zo/%3Fv%3D1767873720/https/cdn.shopify.com/s/files/1/0631/5514/2847/files/A555D25GEN-PUR_1.jpg?format=webp&width=160&height=160
 
 Full Embed JSON:
 {
   "color": "border-left-color: hsla(97, calc(var(--saturation-factor, 1) * 63.6%), 67.6%, 1);",
   "links": [
     {
-      "url": "https://www.amazon.co.uk/",
-      "text": "Amazon UK V3",
+      "url": "https://www.overkillshop.com/",
+      "text": "OVERKILL | https://www.overkillshop.com/",
       "type": "author"
     },
     {
-      "url": "https://offers.zephr.app/r/o?o=oLxZNFJvhbPL9vW2QjKuZlUPNsr1aAAr%2BszmA4WkJqPAPDHjUWyhpl2b%2FhCVfw2W2zqnVqY7GcXcH0%2BC223snHznA4YXrF3btAp6jVZOFXB0tHSbZomI%2BDd%2BpVGfaVjp&t=zephyrmonitorsuk-20&q=1&c=UK&a=B0FP3SBK1S",
-      "text": "ATCx1",
-      "field": "One Click Checkout"
+      "url": "https://zephr.app/fsr?s=www.overkillshop.com_f=7_v=56191060259910;56191060292678;56191060325446",
+      "text": "Bot 1 FSR",
+      "field": "Full Size Run"
     },
     {
-      "url": "https://offers.zephr.app/r/o?o=oLxZNFJvhbPL9vW2QjKuZlUPNsr1aAAr%2BszmA4WkJqPAPDHjUWyhpl2b%2FhCVfw2W2zqnVqY7GcXcH0%2BC223snHznA4YXrF3btAp6jVZOFXB0tHSbZomI%2BDd%2BpVGfaVjp&t=zephyrmonitorsuk-20&q=2&c=UK&a=B0FP3SBK1S",
-      "text": "ATCx2",
-      "field": "One Click Checkout"
+      "url": "https://zephr.app/az?s=www.overkillshop.com_v=56191060259910_f=7",
+      "text": "S",
+      "field": "ATC / QT"
     },
     {
-      "url": "https://offers.zephr.app/r/o?o=oLxZNFJvhbPL9vW2QjKuZlUPNsr1aAAr%2BszmA4WkJqPAPDHjUWyhpl2b%2FhCVfw2W2zqnVqY7GcXcH0%2BC223snHznA4YXrF3btAp6jVZOFXB0tHSbZomI%2BDd%2BpVGfaVjp&t=zephyrmonitorsuk-20&q=3&c=UK&a=B0FP3SBK1S",
-      "text": "ATCx3",
-      "field": "One Click Checkout"
+      "url": "https://zephr.app/vq?s=www.overkillshop.com_v=56191060259910_f=7",
+      "text": "QT",
+      "field": "ATC / QT"
     },
     {
-      "url": "https://www.amazon.co.uk/sign-in",
-      "text": "Login",
+      "url": "https://zephr.app/az?s=www.overkillshop.com_v=56191060292678_f=7",
+      "text": "M",
+      "field": "ATC / QT"
+    },
+    {
+      "url": "https://zephr.app/vq?s=www.overkillshop.com_v=56191060292678_f=7",
+      "text": "QT",
+      "field": "ATC / QT"
+    },
+    {
+      "url": "https://zephr.app/az?s=www.overkillshop.com_v=56191060325446_f=7",
+      "text": "L",
+      "field": ""
+    },
+    {
+      "url": "https://zephr.app/vq?s=www.overkillshop.com_v=56191060325446_f=7",
+      "text": "QT",
+      "field": ""
+    },
+    {
+      "url": "https://zephr.app/mN?u=www.overkillshop.com/products/stance-pokemon-gengar-crew-socks-a555d25gen-pur-purple",
+      "text": "Quicktask",
       "field": "Links"
     },
     {
-      "url": "https://www.amazon.co.uk/gp/cart/view.html?tag=",
-      "text": "Cart",
+      "url": "https://zephr.app/mlc?u=www.overkillshop.com/products/stance-pokemon-gengar-crew-socks-a555d25gen-pur-purple",
+      "text": "Link Change",
       "field": "Links"
     },
     {
-      "url": "https://keepa.com/#!product/1-B0FP3SBK1S",
-      "text": "Keepa",
+      "url": "https://stockx.com/search?s=Gengar+Crew+Socks",
+      "text": "StockX",
       "field": "Links"
     },
     {
-      "url": "https://www.ebay.com/sch/i.html?_nkw=Pokémon+TCG%3A+Collector+Chest+–+Mega+Gardevoir%E2%80%AF%26+Mega+Lucario+(3+Foil+Cards%2C+6+Booster+Packs+%26+More)",
+      "url": "https://zephr.app/quicktasks/",
+      "text": "Setup",
+      "field": "Links"
+    },
+    {
+      "url": "https://zephr.app/l/fc",
+      "text": "Setup ShopPay",
+      "field": ""
+    },
+    {
+      "url": "https://ebay.com/sch/i.html?_nkw=Gengar+Crew+Socks",
       "text": "Ebay",
-      "field": "Links"
-    },
-    {
-      "url": "https://www.ebay.com/sch/i.html?_nkw=Pokémon+TCG%3A+Collector+Chest+–+Mega+Gardevoir%E2%80%AF%26+Mega+Lucario+(3+Foil+Cards%2C+6+Booster+Packs+%26+More)&rt=nc&LH_Sold=1&LH_Complete=1",
-      "text": "Ebay Sales",
-      "field": "Links"
+      "field": ""
     }
   ],
-  "title": "Pokmon TCG: Collector Chest  Mega Gardevoir & Mega Lucario (3 Foil Cards, 6 Booster Packs & More)",
+  "title": "Gengar Crew Socks",
   "author": {
-    "url": "https://www.amazon.co.uk/",
-    "name": "Amazon UK V3"
+    "url": "https://www.overkillshop.com/",
+    "name": "OVERKILL | https://www.overkillshop.com/"
   },
   "fields": [
     {
       "name": "Price",
-      "value": "29.99"
+      "value": "19.99 EUR (23.4 USD)"
     },
     {
       "name": "Price",
-      "value": "29.99"
-    },
-    {
-      "name": "Type",
-      "value": "Restock"
-    },
-    {
-      "name": "ASIN",
-      "value": "B0FP3SBK1S"
+      "value": "19.99 EUR (23.4 USD)"
     },
     {
       "name": "Stock",
-      "value": "1+"
+      "value": "3+"
     },
     {
-      "name": "One Click Checkout",
-      "value": "[ATCx1](https://offers.zephr.app/r/o?o=oLxZNFJvhbPL9vW2QjKuZlUPNsr1aAAr%2BszmA4WkJqPAPDHjUWyhpl2b%2FhCVfw2W2zqnVqY7GcXcH0%2BC223snHznA4YXrF3btAp6jVZOFXB0tHSbZomI%2BDd%2BpVGfaVjp&t=zephyrmonitorsuk-20&q=1&c=UK&a=B0FP3SBK1S) | [ATCx2](https://offers.zephr.app/r/o?o=oLxZNFJvhbPL9vW2QjKuZlUPNsr1aAAr%2BszmA4WkJqPAPDHjUWyhpl2b%2FhCVfw2W2zqnVqY7GcXcH0%2BC223snHznA4YXrF3btAp6jVZOFXB0tHSbZomI%2BDd%2BpVGfaVjp&t=zephyrmonitorsuk-20&q=2&c=UK&a=B0FP3SBK1S)"
+      "name": "Full Size Run",
+      "value": "[ Bot 1 FSR](https://zephr.app/fsr?s=www.overkillshop.com_f=7_v=56191060259910;56191060292678;56191060325446)"
     },
     {
-      "name": "One Click Checkout",
-      "value": "[ATCx3](https://offers.zephr.app/r/o?o=oLxZNFJvhbPL9vW2QjKuZlUPNsr1aAAr%2BszmA4WkJqPAPDHjUWyhpl2b%2FhCVfw2W2zqnVqY7GcXcH0%2BC223snHznA4YXrF3btAp6jVZOFXB0tHSbZomI%2BDd%2BpVGfaVjp&t=zephyrmonitorsuk-20&q=3&c=UK&a=B0FP3SBK1S)"
+      "name": "Options",
+      "value": ""
     },
     {
-      "name": "Offer Id",
-      "value": "oLxZNFJvhbPL9vW2QjKuZlUPNsr1aAAr%2BszmA4WkJqPAPDHjUWyhpl2b%2FhCVfw2W2zqnVqY7GcXcH0%2BC223snHznA4YXrF3btAp6jVZOFXB0tHSbZomI%2BDd%2BpVGfaVjp"
+      "name": "ATC / QT",
+      "value": "[S](https://zephr.app/az?s=www.overkillshop.com_v=56191060259910_f=7) | [QT](https://zephr.app/vq?s=www.overkillshop.com_v=56191060259910_f=7) [+]"
+    },
+    {
+      "name": "ATC / QT",
+      "value": "[M](https://zephr.app/az?s=www.overkillshop.com_v=56191060292678_f=7) | [QT](https://zephr.app/vq?s=www.overkillshop.com_v=56191060292678_f=7) [+]"
+    },
+    {
+      "name": "",
+      "value": "[L](https://zephr.app/az?s=www.overkillshop.com_v=56191060325446_f=7) | [QT](https://zephr.app/vq?s=www.overkillshop.com_v=56191060325446_f=7) [+]"
     },
     {
       "name": "Links",
-      "value": "[Login](https://www.amazon.co.uk/sign-in) | [Cart](https://www.amazon.co.uk/gp/cart/view.html?tag=) | [Keepa](https://keepa.com/#!product/1-B0FP3SBK1S) | [Ebay](https://www.ebay.com/sch/i.html?_nkw=Pok%C3%A9mon+TCG%3A+Collector+Chest+%E2%80%93+Mega+Gardevoir%E2%80%AF%26+Mega+Lucario+(3+Foil+Cards%2C+6+Booster+Packs+%26+More)) | [Ebay Sales](https://www.ebay.com/sch/i.html?_nkw=Pok%C3%A9mon+TCG%3A+Collector+Chest+%E2%80%93+Mega+Gardevoir%E2%80%AF%26+Mega+Lucario+(3+Foil+Cards%2C+6+Booster+Packs+%26+More)&rt=nc&LH_Sold=1&LH_Complete=1)"
+      "value": "[Quicktask](https://zephr.app/mN?u=www.overkillshop.com/products/stance-pokemon-gengar-crew-socks-a555d25gen-pur-purple) | [Link Change](https://zephr.app/mlc?u=www.overkillshop.com/products/stance-pokemon-gengar-crew-socks-a555d25gen-pur-purple) | [StockX](https://stockx.com/search?s=Gengar+Crew+Socks) | [Setup](https://zephr.app/quicktasks/) | SRC: 12"
+    },
+    {
+      "name": "",
+      "value": "[Setup ShopPay](https://zephr.app/l/fc) | [Ebay](https://ebay.com/sch/i.html?_nkw=Gengar+Crew+Socks)"
     }
   ],
-  "footer": "Monitors v2.0.0 | CCN x Zephyr Monitors #ad [11:29:10]Today at 6:29 AM",
+  "footer": "Shopify v20.4.4 | CCN x Zephyr Monitors [04:16:50 PST]",
   "images": [
-    "https://images-ext-1.discordapp.net/external/qUoo6m-VPmSseo3A3czy64HQsj-ftLppTvsW4GIcqCg/https/m.media-amazon.com/images/I/511nSF7YpmL._SL160_.jpg?format=webp"
+    "https://images-ext-1.discordapp.net/external/9vNSEkfkTXktdvJRd7FgvN0WtZCOhQRp8QeBK9h_0zo/%3Fv%3D1767873720/https/cdn.shopify.com/s/files/1/0631/5514/2847/files/A555D25GEN-PUR_1.jpg?format=webp&width=160&height=160"
   ],
   "thumbnail": null,
   "timestamp": null,

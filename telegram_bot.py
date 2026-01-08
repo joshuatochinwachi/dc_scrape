@@ -167,6 +167,20 @@ def fetch_product_images(url: str, max_images: int = 3) -> List[str]:
             'view', 'front', 'back', 'side'
         ]
         
+        # Priority 0: Meta Tags (The most reliable verification)
+        # Sites explicitly define these for social sharing
+        for meta in soup.find_all('meta'):
+            prop = meta.get('property', '')
+            name = meta.get('name', '')
+            if prop in ['og:image', 'twitter:image'] or name in ['og:image', 'twitter:image']:
+                 meta_url = meta.get('content')
+                 if meta_url and meta_url.startswith('http') and not any(k in meta_url.lower() for k in skip_keywords):
+                     images.append({
+                        'url': meta_url,
+                        'alt': 'Meta Tag Image',
+                        'priority': 1000 # Super high priority
+                     })
+
         # Priority 1: Look for product images in data attributes and meta tags
         for img in soup.find_all('img'):
             img_url = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
@@ -182,7 +196,17 @@ def fetch_product_images(url: str, max_images: int = 3) -> List[str]:
             if img_url.startswith('data:'):
                 continue
             
+            # 2a. HARD FILTER: Verify it looks like a product image
+            # Discard tiny images which are likely icons
+            if 'width' in img.attrs and 'height' in img.attrs:
+                try:
+                    w = int(str(img['width']).replace('px',''))
+                    h = int(str(img['height']).replace('px',''))
+                    if w < 100 or h < 100: continue # Too small to be a product
+                except: pass
+            
             # Skip if URL contains skip keywords
+
             img_url_lower = img_url.lower()
             if any(skip in img_url_lower for skip in skip_keywords):
                 continue
@@ -1304,130 +1328,194 @@ def format_telegram_message(msg_data: Dict) -> Tuple[str, Optional[str], Optiona
     
     text = "\n".join(lines)
     
-    # === IMAGE EXTRACTION ===
-    # Get ONE image: Use the CDN image URL stored in the embed
-    image_url = None
-    is_discord_image = True  # Mark all as needing download to preserve quality
+    # === LINK PARSING (Moved up for image scraping) ===
+    all_links = embed.get("links", []) if embed else []
+    seen_urls = set()
+    title_links = []
+    ebay_links = []
+    fba_links = []
+    atc_links = []
+    buy_links = []
+    other_links = []
     
-    # Use the CDN image URL from the embed (stored in database)
-    # These are high-quality retailer URLs (Shopify, Amazon, etc.)
+    for link in all_links:
+        text_lower = link.get('text', '').lower()
+        url = link.get('url', '')
+        link_text = link.get('text', 'Link')
+        field = link.get('field', '').lower()
+        link_type = link.get('type', '').lower() # Check for 'title' type
+        
+        if not url or not url.startswith('http'): continue
+        if url in seen_urls: continue
+        
+        # Helper to categorize
+        def add_category(cat_list):
+            cat_list.append({'text': link_text, 'url': url, 'field': field})
+            seen_urls.add(url)
+            
+        if link_type == 'title':
+            add_category(title_links)
+        elif 'atc' in field or 'qt' in field:
+            add_category(atc_links)
+
+        elif 'link' in field:
+            if any(kw in text_lower for kw in ['sold', 'active', 'google', 'ebay']):
+                add_category(ebay_links)
+            elif any(kw in text_lower for kw in ['keepa', 'amazon', 'selleramp', 'camel']):
+                add_category(fba_links)
+            elif any(kw in text_lower for kw in ['buy', 'shop', 'purchase', 'checkout', 'cart']):
+                add_category(buy_links)
+            else:
+                add_category(other_links)
+        else:
+            if any(kw in text_lower for kw in ['sold', 'active', 'google', 'ebay']):
+                add_category(ebay_links)
+            elif any(kw in text_lower for kw in ['keepa', 'amazon', 'selleramp', 'camel']):
+                add_category(fba_links)
+            elif any(kw in text_lower for kw in ['buy', 'shop', 'purchase', 'checkout', 'cart']):
+                add_category(buy_links)
+            else:
+                add_category(other_links)
+
+    # === IMAGE STRATEGY ===
+    # Strategy: "Trusted Resolution" vs "Scrape"
+    # 1. Get Discord Embed Image and Optimize it.
+    # 2. If it's a "Trusted Retailer" (Amazon/eBay) where we KNOW we fixed the resolution -> Use it (Fast).
+    # 3. If it's an unknown site (potential low res or logo) -> Scrape Website.
+    # 4. Fallback -> Use Discord Image.
+
+    image_url = None
+    is_discord_image = False
+    
+    # 1. Get Candidate from Discord (Raw & Optimized)
+    discord_raw = None
+    discord_opt = None
     if embed:
         if embed.get("images"):
-            # Discord embed images contain the original CDN links from retailers
-            raw_url = embed["images"][0]
-            image_url = optimize_image_url(raw_url)
-            logger.info(f"   📸 Found image: {raw_url[:50]}... -> Optimized: {image_url[:50]}...")
+            discord_raw = embed["images"][0]
+            discord_opt = optimize_image_url(discord_raw) # removes width/height params if possible
         elif embed.get("thumbnail"):
-            raw_url = embed["thumbnail"]
-            image_url = optimize_image_url(raw_url)
-            logger.info(f"   📸 Found thumbnail: {raw_url[:50]}... -> Optimized: {image_url[:50]}...")
+            discord_raw = embed["thumbnail"]
+            discord_opt = optimize_image_url(discord_raw)
+            
+    # 2. Check Resolution & Trust
+    use_discord_candidate = False
     
-    # === BUTTON CREATION (GENERIC + CUSTOM) ===
+    if discord_opt:
+        # A. Trusted High-Res (Amazon/eBay) - ALWAYS USE
+        trusted_domains = ['amazon', 'ebay', 'media-amazon', 'ebayimg']
+        if any(d in discord_opt.lower() for d in trusted_domains):
+            use_discord_candidate = True
+            logger.info(f"   📸 Trusted High-Res Image (Skipping Scrape): {discord_opt[:60]}...")
+            
+        # B. Check Resolution from Raw Proxy URL (if not trusted yet)
+        if not use_discord_candidate and discord_raw:
+             # Look for width=XXX&height=YYY params in the raw discord proxy url
+             w_match = re.search(r'width=(\d+)', discord_raw)
+             h_match = re.search(r'height=(\d+)', discord_raw)
+             
+             if w_match and h_match:
+                 w = int(w_match.group(1))
+                 h = int(h_match.group(1))
+                 # Relaxed check: valid if EITHER dimension is large enough (e.g. 160x1600 is fine)
+                 if w >= 300 or h >= 300:
+                     use_discord_candidate = True
+                     logger.info(f"   📸 Discord Image is High-Res ({w}x{h}). Using it.")
+                 else:
+                     logger.info(f"   ⚠️ Discord Image is Low-Res ({w}x{h}). Will Scrape.")
+                     
+             elif not "discordapp.net" in discord_raw:
+                 # If it's NOT a proxy URL (it's a direct link), we assume it's good?
+                 # Or if no width/height params found?
+                 # If we can't determine res, safe to scrape?
+                 # Let's say if it's original source and not proxy, it might be fine, but to be safe for "Evo Cards" etc, let's scrape if unknown.
+                 pass
+
+    if use_discord_candidate:
+        image_url = discord_opt
+        is_discord_image = True # treat as verified
+        
+    else:
+        # 3. Attempt Scraping (For unknown sites or unverified resolution)
+        target_scrape_url = None
+        
+        # Priority: Title > Buy > ATC > Other
+        if title_links: target_scrape_url = title_links[0]['url']
+        elif buy_links: target_scrape_url = buy_links[0]['url']
+        elif atc_links: target_scrape_url = atc_links[0]['url']
+        elif other_links: target_scrape_url = other_links[0]['url']
+        
+        # Don't scrape generic pages
+        if target_scrape_url:
+            skip_scrape = any(x in target_scrape_url.lower() for x in ['keepa.com', 'ebay.com/sch', 'login', 'cart', 'checkout'])
+            if not skip_scrape:
+                logger.info(f"   🔍 Attempting to scrape images from: {target_scrape_url[:60]}...")
+                scraped_images = fetch_product_images(target_scrape_url, max_images=1)
+                if scraped_images:
+                    image_url = scraped_images[0]
+                    is_discord_image = False
+                    logger.info(f"   📸 ✅ Using scraped website image: {image_url[:60]}...")
+
+        # 4. Fallback to Discord Candidate
+        if not image_url and discord_opt:
+            image_url = discord_opt
+            is_discord_image = True
+            logger.info(f"   📸 Fallback to Discord image (Optimized): {image_url[:60]}...")
+    
+    # === BUTTON CREATION ===
     keyboard = []
     
-    # Logic for button creation same as before (extracting from fields/links)
-    if embed and embed.get("links"):
-        all_links = embed["links"]
-        seen_urls = set()
-        ebay_links = []
-        fba_links = []
-        atc_links = []
-        buy_links = []
-        other_links = []
-        
-        for link in all_links:
-            text_lower = link.get('text', '').lower()
-            url = link.get('url', '')
-            link_text = link.get('text', 'Link')
-            field = link.get('field', '').lower()
-            
-            if not url or not url.startswith('http'): continue
-            if url in seen_urls: continue
-            
-            if 'atc' in field or 'qt' in field:
-                atc_links.append({'text': link_text, 'url': url, 'field': field})
-                seen_urls.add(url)
-            elif 'link' in field:
-                # These are the main links from the Links field
-                if any(kw in text_lower for kw in ['sold', 'active', 'google', 'ebay']):
-                    ebay_links.append({'text': link_text, 'url': url})
-                    seen_urls.add(url)
-                elif any(kw in text_lower for kw in ['keepa', 'amazon', 'selleramp', 'camel']):
-                    fba_links.append({'text': link_text, 'url': url})
-                    seen_urls.add(url)
-                elif any(kw in text_lower for kw in ['buy', 'shop', 'purchase', 'checkout', 'cart']):
-                    buy_links.append({'text': link_text, 'url': url})
-                    seen_urls.add(url)
-                else:
-                    other_links.append({'text': link_text, 'url': url})
-                    seen_urls.add(url)
-            else:
-                # Uncategorized links from other fields
-                if any(kw in text_lower for kw in ['sold', 'active', 'google', 'ebay']):
-                    ebay_links.append({'text': link_text, 'url': url})
-                    seen_urls.add(url)
-                elif any(kw in text_lower for kw in ['keepa', 'amazon', 'selleramp', 'camel']):
-                    fba_links.append({'text': link_text, 'url': url})
-                    seen_urls.add(url)
-                elif any(kw in text_lower for kw in ['buy', 'shop', 'purchase', 'checkout', 'cart']):
-                    buy_links.append({'text': link_text, 'url': url})
-                    seen_urls.add(url)
-                else:
-                    other_links.append({'text': link_text, 'url': url})
-                    seen_urls.add(url)
-        
-        # Row 1: Price Checking (eBay links)
-        if ebay_links:
-            row = []
-            for link in ebay_links[:3]:
-                emoji = '💰' if 'sold' in link['text'].lower() else '⚡'
-                btn_text = f"{emoji} {link['text'][:15]}"
-                row.append(InlineKeyboardButton(btn_text, url=link['url']))
-            if row:
+    # Row 1: Price Checking (eBay links)
+    if ebay_links:
+        row = []
+        for link in ebay_links[:3]:
+            emoji = '💰' if 'sold' in link['text'].lower() else '⚡'
+            btn_text = f"{emoji} {link['text'][:15]}"
+            row.append(InlineKeyboardButton(btn_text, url=link['url']))
+        if row:
+            keyboard.append(row)
+    
+    # Row 2: FBA/Analysis
+    if fba_links:
+        row = []
+        for link in fba_links[:3]:
+            emoji = '📈' if 'keepa' in link['text'].lower() else '🔎'
+            btn_text = f"{emoji} {link['text'][:15]}"
+            row.append(InlineKeyboardButton(btn_text, url=link['url']))
+        if row:
+            keyboard.append(row)
+    
+    # Row 3: Direct Buy Links
+    if buy_links:
+        row = []
+        for link in buy_links[:2]:
+            btn_text = f"🛒 {link['text'][:18]}"
+            row.append(InlineKeyboardButton(btn_text, url=link['url']))
+        if row:
+            keyboard.append(row)
+    
+    # Row 4: ATC (Add To Cart) Options
+    if atc_links:
+        row = []
+        for link in atc_links[:5]:
+            qty_match = re.search(r'\d+', link['text'])
+            qty = qty_match.group(0) if qty_match else link['text']
+            btn_text = f"🛒 {qty}"
+            row.append(InlineKeyboardButton(btn_text, url=link['url']))
+            if len(row) == 3:
                 keyboard.append(row)
-        
-        # Row 2: FBA/Analysis
-        if fba_links:
-            row = []
-            for link in fba_links[:3]:
-                emoji = '📈' if 'keepa' in link['text'].lower() else '🔎'
-                btn_text = f"{emoji} {link['text'][:15]}"
-                row.append(InlineKeyboardButton(btn_text, url=link['url']))
-            if row:
-                keyboard.append(row)
-        
-        # Row 3: Direct Buy Links
-        if buy_links:
-            row = []
-            for link in buy_links[:2]:
-                btn_text = f"🛒 {link['text'][:18]}"
-                row.append(InlineKeyboardButton(btn_text, url=link['url']))
-            if row:
-                keyboard.append(row)
-        
-        # Row 4: ATC (Add To Cart) Options
-        if atc_links:
-            row = []
-            for link in atc_links[:5]:
-                # Extract quantity from text if possible
-                qty_match = re.search(r'\d+', link['text'])
-                qty = qty_match.group(0) if qty_match else link['text']
-                btn_text = f"🛒 {qty}"
-                row.append(InlineKeyboardButton(btn_text, url=link['url']))
-                if len(row) == 3:
-                    keyboard.append(row)
-                    row = []
-            if row:
-                keyboard.append(row)
-        
-        # Row 5: Other Links
-        if other_links:
-            row = []
-            for link in other_links[:3]:
-                btn_text = f"🔗 {link['text'][:15]}"
-                row.append(InlineKeyboardButton(btn_text, url=link['url']))
-            if row:
-                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+    
+    # Row 5: Other Links
+    if other_links:
+        row = []
+        for link in other_links[:3]:
+            btn_text = f"🔗 {link['text'][:15]}"
+            row.append(InlineKeyboardButton(btn_text, url=link['url']))
+        if row:
+            keyboard.append(row)
     
     # Add custom buttons if any
     if custom_buttons:
