@@ -138,7 +138,7 @@ def fetch_product_images(url: str, max_images: int = 3) -> List[str]:
     try:
         # Set a proper user agent to avoid blocking
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
         
         response = requests.get(url, headers=headers, timeout=10)
@@ -147,31 +147,139 @@ def fetch_product_images(url: str, max_images: int = 3) -> List[str]:
         soup = BeautifulSoup(response.content, 'html.parser')
         images = []
         
+        # Keywords to skip (logos, navigation, UI elements)
+        skip_keywords = [
+            'logo', 'icon', 'placeholder', 'avatar', 'pixel', '1x1', 'spinner', 'loading',
+            'nav', 'menu', 'footer', 'header', 'banner', 'ad', 'social', 'share', 'btn',
+            'badge', 'flag', 'currency', 'rating', 'star', 'heart', 'like', 'comment',
+            'thumbnail', 'thumb', 'variant', 'swatch', 'color-swatch'
+        ]
+        
+        # Keywords that indicate product images (MAIN images preferred)
+        main_product_keywords = [
+            'main', 'gallery', 'hero', 'primary', 'feature', 'featured',
+            'large', 'full', 'display', 'showcase'
+        ]
+        
+        # Secondary product keywords
+        product_keywords = [
+            'product', 'item', 'photo', 'image', 'picture', 'detail',
+            'view', 'front', 'back', 'side'
+        ]
+        
         # Priority 1: Look for product images in data attributes and meta tags
         for img in soup.find_all('img'):
             img_url = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
-            if img_url:
-                # Convert relative URLs to absolute
-                if img_url.startswith('/'):
-                    from urllib.parse import urljoin
-                    img_url = urljoin(url, img_url)
+            if not img_url:
+                continue
+            
+            # Convert relative URLs to absolute
+            if img_url.startswith('/'):
+                from urllib.parse import urljoin
+                img_url = urljoin(url, img_url)
+            
+            # Skip data URIs
+            if img_url.startswith('data:'):
+                continue
+            
+            # Skip if URL contains skip keywords
+            img_url_lower = img_url.lower()
+            if any(skip in img_url_lower for skip in skip_keywords):
+                continue
+            
+            # Get alt text and class info
+            alt_text = img.get('alt', '').lower()
+            img_class = img.get('class', [])
+            if isinstance(img_class, list):
+                img_class = ' '.join(img_class).lower()
+            else:
+                img_class = str(img_class).lower()
+            
+            # Check ID attribute too
+            img_id = img.get('id', '').lower()
+            
+            # Get parent container info
+            parent = img.parent
+            parent_class = ''
+            parent_id = ''
+            if parent:
+                parent_class = parent.get('class', [])
+                if isinstance(parent_class, list):
+                    parent_class = ' '.join(parent_class).lower()
+                else:
+                    parent_class = str(parent_class).lower()
                 
-                # Filter out tiny images, logos, and tracking pixels
-                if any(skip in img_url.lower() for skip in ['logo', 'icon', 'placeholder', 'avatar', 'pixel', '1x1']):
-                    continue
+                parent_id = parent.get('id', '').lower()
                 
-                # Prioritize product images (common patterns)
-                alt_text = img.get('alt', '').lower()
-                is_likely_product = any(kw in alt_text for kw in ['product', 'item', 'photo', 'image', 'picture'])
-                
-                images.append({
-                    'url': img_url,
-                    'alt': alt_text,
-                    'is_product': is_likely_product,
-                    'priority': 1 if is_likely_product else 0
-                })
+                # Also check grandparent for gallery/main containers
+                grandparent = parent.parent
+                if grandparent:
+                    gp_class = grandparent.get('class', [])
+                    if isinstance(gp_class, list):
+                        gp_class = ' '.join(gp_class).lower()
+                    else:
+                        gp_class = str(gp_class).lower()
+                    parent_class += ' ' + gp_class
+            
+            # Calculate priority score
+            priority = 0
+            
+            # HIGHEST PRIORITY: In main/gallery container
+            if any(kw in parent_class or kw in parent_id for kw in ['main', 'gallery', 'hero', 'primary', 'feature']):
+                priority += 500
+            if any(kw in img_id for kw in ['main', 'gallery', 'hero', 'primary', 'feature']):
+                priority += 450
+            
+            # VERY HIGH PRIORITY: Main product keywords in alt/class
+            if any(kw in alt_text for kw in main_product_keywords):
+                priority += 200
+            if any(kw in img_class for kw in main_product_keywords):
+                priority += 180
+            
+            # HIGH PRIORITY: General product keywords
+            if any(kw in alt_text for kw in product_keywords):
+                priority += 100
+            if any(kw in img_class for kw in product_keywords):
+                priority += 90
+            if any(kw in parent_class for kw in product_keywords):
+                priority += 80
+            
+            # MEDIUM PRIORITY: Product keywords in URL
+            if any(kw in img_url_lower for kw in product_keywords):
+                priority += 50
+            
+            # MEDIUM PRIORITY: Large images (product images usually 300px+)
+            width = img.get('width')
+            height = img.get('height')
+            if width and height:
+                try:
+                    w = int(str(width).replace('px', ''))
+                    h = int(str(height).replace('px', ''))
+                    # Prefer larger images (main product images)
+                    if w >= 500 and h >= 500:
+                        priority += 100
+                    elif w >= 300 and h >= 300:
+                        priority += 50
+                    elif w >= 200 and h >= 200:
+                        priority += 10
+                except:
+                    pass
+            
+            # PENALTY: Likely a variant/option image
+            if any(x in img_url_lower for x in ['variant', 'color', 'option']):
+                priority -= 100
+            
+            # Skip if priority too low (likely decoration/nav)
+            if priority < 10:
+                continue
+            
+            images.append({
+                'url': img_url,
+                'alt': alt_text,
+                'priority': priority
+            })
         
-        # Sort by priority (product images first)
+        # Sort by priority (highest first)
         images.sort(key=lambda x: x['priority'], reverse=True)
         
         # Remove duplicates and return just URLs
@@ -185,11 +293,13 @@ def fetch_product_images(url: str, max_images: int = 3) -> List[str]:
                 if len(result) >= max_images:
                     break
         
-        logger.debug(f"   📸 Scraped {len(result)} product images from {url}")
+        logger.info(f"   📸 Scraped {len(result)} product image(s) from website")
+        if result:
+            logger.info(f"      First image: {result[0][:100]}...")
         return result
         
     except Exception as e:
-        logger.debug(f"   ⚠️ Could not scrape images from {url}: {str(e)}")
+        logger.info(f"   ⚠️ Could not scrape images from {url}: {str(e)}")
         return []
 
 
@@ -212,7 +322,7 @@ def download_image_without_compression(image_url: str) -> Optional[bytes]:
         return response.content
         
     except Exception as e:
-        logger.debug(f"   ⚠️ Could not download image {image_url}: {str(e)}")
+        logger.info(f"   ⚠️ Could not download image {image_url}: {str(e)}")
         return None
 
 
@@ -1159,32 +1269,65 @@ def format_telegram_message(msg_data: Dict) -> Tuple[str, Optional[str], Optiona
     
     # Try to fetch high-quality image from product website first
     product_url = None
-    if embed and embed.get("links"):
+    
+    # First, check if embed has a URL (title link)
+    if embed and embed.get("url"):
+        product_url = embed.get("url")
+        logger.info(f"   📍 Found embed URL: {product_url[:80]}...")
+    
+    # Otherwise, check links array for product links
+    if not product_url and embed and embed.get("links"):
+        logger.info(f"   🔍 Checking {len(embed['links'])} links in embed...")
         for link in embed["links"]:
             link_text = link.get('text', '').lower()
             url = link.get('url', '')
             field = link.get('field', '').lower()
             
-            # Prioritize "Buy" and product shop links for image scraping
-            if url and url.startswith('http'):
-                if any(kw in link_text for kw in ['buy', 'shop', 'product', 'checkout', 'amazon', 'ebay']):
-                    product_url = url
-                    break
+            # Skip tool/utility links (ATC, QT, Setup)
+            if any(kw in link_text for kw in ['setup', 'quicktask', 'atc', 'qt']):
+                logger.info(f"      ⏭️  Skipping tool link: {link_text}")
+                continue
+            
+            if not url or not url.startswith('http'):
+                continue
+            
+            logger.info(f"      🔗 Evaluating link: {link_text} -> {url[:60]}...")
+            
+            # Accept any link that points to a known retailer/marketplace
+            is_search_link = any(domain in url.lower() for domain in ['amazon.com', 'ebay.com', 'ebay.co.uk', 'stockx.com', 'snkrdunk.com', 'google.com', 'keepa.com', 'camel.com', 'selleramp'])
+            is_product_keyword = any(kw in link_text for kw in ['buy', 'shop', 'product', 'checkout', 'search', 'click here'])
+            is_major_retailer = any(domain in url.lower() for domain in ['amazon', 'ebay', 'stockx', 'snkrdunk', 'shopify', 'currys', 'argos', 'awd-it', 'collectorsedge', '.co.uk', '.com'])
+            
+            if is_search_link or is_product_keyword or is_major_retailer:
+                product_url = url
+                logger.info(f"   ✅ Selected URL for scraping: {url[:80]}...")
+                break
+            else:
+                logger.info(f"      ❌ Did not match criteria (search:{is_search_link}, keyword:{is_product_keyword}, retailer:{is_major_retailer})")
     
     # Fetch image from product website (get only 1)
     if product_url:
-        website_images = fetch_product_images(product_url, max_images=1)
-        if website_images:
-            image_url = website_images[0]
+        try:
+            website_images = fetch_product_images(product_url, max_images=1)
+            if website_images and len(website_images) > 0:
+                image_url = website_images[0]
+                is_discord_image = False
+                logger.info(f"   ✅ Using website image: {image_url[:80]}...")
+            else:
+                logger.info(f"   ⚠️  No images found on website, falling back to Discord")
+        except Exception as e:
+            logger.info(f"   ⚠️  Website scraping failed: {e}")
     
     # Fallback to Discord embed image if no website image found
     if not image_url and embed:
         if embed.get("images"):
             image_url = embed["images"][0]
             is_discord_image = True
+            logger.info(f"   📸 Using Discord image (fallback)")
         elif embed.get("thumbnail"):
             image_url = embed["thumbnail"]
             is_discord_image = True
+            logger.info(f"   📸 Using Discord thumbnail (fallback)")
     
     # === BUTTON CREATION (GENERIC + CUSTOM) ===
     keyboard = []
