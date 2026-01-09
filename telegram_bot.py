@@ -1548,7 +1548,7 @@ def format_telegram_message(msg_data: Dict) -> Tuple[str, Optional[str], Optiona
                 
                 # Trust it if it's high res (>= 400px in either dimension)
                 # This covers long thin images or wide banners correctly
-                if width >= 160 or height >= 160:
+                if width >= 200 or height >= 200:
                     image_url = discord_candidate
                     image_bytes = downloaded
                     logger.info(f"   📸 ✅ Discord image is High-Res pixels ({width}x{height}). Skipping scrape.")
