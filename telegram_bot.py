@@ -1597,18 +1597,21 @@ def format_telegram_message(msg_data: Dict) -> Tuple[str, Optional[str], Optiona
                  w = int(w_match.group(1))
                  h = int(h_match.group(1))
                  # Relaxed check: valid if EITHER dimension is large enough (e.g. 160x1600 is fine)
-                 if w >= 300 or h >= 300:
+                 if w >= 200 or h >= 200:
                      use_discord_candidate = True
                      logger.info(f"   📸 Discord Image is High-Res ({w}x{h}). Using it.")
                  else:
                      logger.info(f"   ⚠️ Discord Image is Low-Res ({w}x{h}). Will Scrape.")
                      
              elif not "discordapp.net" in discord_raw:
-                 # If it's NOT a proxy URL (it's a direct link), we assume it's good?
-                 # Or if no width/height params found?
-                 # If we can't determine res, safe to scrape?
-                 # Let's say if it's original source and not proxy, it might be fine, but to be safe for "Evo Cards" etc, let's scrape if unknown.
-                 pass
+                 # If it's NOT a proxy URL (it's a direct link), we assume it's good.
+                 use_discord_candidate = True
+                 logger.info(f"   📸 Direct CDN Image found. Using it.")
+             else:
+                 # If it's a proxy link but no width/height params are found,
+                 # we assume it's high-res to avoid getting blocked by scrapers.
+                 use_discord_candidate = True
+                 logger.info(f"   📸 Discord Proxy Image found without dimensions. Using it.")
 
     if use_discord_candidate:
         image_url = discord_opt
