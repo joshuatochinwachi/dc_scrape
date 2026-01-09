@@ -10,3 +10,4 @@ gunicorn
 nest_asyncio==1.5.8
 playwright==1.40.0
 beautifulsoup4
+Pillow
