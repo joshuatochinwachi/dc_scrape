@@ -1847,20 +1847,25 @@ async def test_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for msg in messages:
             text, image_url, keyboard, is_discord_image = format_telegram_message(msg)
             
-            # Send (Admin only)
+            # Prepare photo data once
+            photo_data = image_url
             if image_url:
                 try:
-                    # If Discord image, download raw bytes to preserve quality
-                    photo_data = image_url
-                    if is_discord_image:
-                        # Run blocking sync operation in thread pool to avoid blocking event loop
-                        loop = asyncio.get_event_loop()
-                        downloaded = await loop.run_in_executor(sync_executor, download_image_without_compression, image_url)
-                        if downloaded:
-                            # Wrap bytes in BytesIO to preserve quality (no compression)
-                            from io import BytesIO
-                            photo_data = BytesIO(downloaded)
-                            logger.info(f"   ✅ Downloaded image as bytes ({len(downloaded)} bytes)")
+                    # Use Pillow (via download_image_high_quality) for ALL images to ensure quality and verification
+                    loop = asyncio.get_event_loop()
+                    downloaded = await loop.run_in_executor(sync_executor, download_image_high_quality, image_url)
+                    if downloaded:
+                        # Wrap bytes in BytesIO to preserve quality
+                        photo_data = BytesIO(downloaded)
+                        logger.info(f"   ✅ Processed image via Pillow ({len(downloaded)} bytes)")
+                except Exception as e:
+                    logger.warning(f"   ⚠️ Pillow processing failed, falling back to URL: {e}")
+
+            # Send (Admin only)
+            if photo_data:
+                try:
+                    # If it's BytesIO, seek(0) to be safe for multiple users (though not needed here)
+                    if isinstance(photo_data, BytesIO): photo_data.seek(0)
                     
                     await context.bot.send_photo(
                         chat_id=user_id,
@@ -2324,6 +2329,20 @@ async def _broadcast_job_inner(context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"   ❌ Failed to format message {msg_idx + 1}: {type(e).__name__}: {e}")
             continue
         
+        # Prepare photo data once per message
+        photo_data = image_url
+        if image_url:
+            try:
+                # Use Pillow (via download_image_high_quality) for ALL images to ensure quality and verification
+                loop = asyncio.get_event_loop()
+                downloaded = await loop.run_in_executor(sync_executor, download_image_high_quality, image_url)
+                if downloaded:
+                    # Store as raw bytes to easily seek(0) in the user loop
+                    photo_data = downloaded
+                    logger.info(f"   ✅ Processed message image via Pillow ({len(downloaded)} bytes)")
+            except Exception as e:
+                logger.warning(f"   ⚠️ Pillow processing failed: {e}")
+
         # Send to all active users with rate limiting
         sent_count = 0
         failed_count = 0
@@ -2331,28 +2350,22 @@ async def _broadcast_job_inner(context: ContextTypes.DEFAULT_TYPE):
         for uid in active_users:
             try:
                 # Send with timeout protection
-                if image_url:
+                if photo_data:
                     try:
-                        # If Discord image, download raw bytes to preserve quality
-                        photo_data = image_url
-                        if is_discord_image:
-                            # Run blocking sync operation in thread pool to avoid blocking event loop
-                            loop = asyncio.get_event_loop()
-                            downloaded = await loop.run_in_executor(sync_executor, download_image_without_compression, image_url)
-                            if downloaded:
-                                # Wrap bytes in BytesIO to preserve quality (no compression)
-                                from io import BytesIO
-                                photo_data = BytesIO(downloaded)
-                        
+                        # Prepare the payload (BytesIO if we have raw bytes)
+                        current_photo = photo_data
+                        if isinstance(photo_data, bytes):
+                            current_photo = BytesIO(photo_data)
+                            
                         await asyncio.wait_for(
                             context.bot.send_photo(
                                 chat_id=uid,
-                                photo=photo_data,
+                                photo=current_photo,
                                 caption=text[:1024],
                                 parse_mode=ParseMode.HTML,
                                 reply_markup=keyboard
                             ),
-                            timeout=10.0
+                            timeout=12.0
                         )
                         sent_count += 1
                         
