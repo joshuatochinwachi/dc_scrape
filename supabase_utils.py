@@ -87,7 +87,7 @@ def insert_discord_messages_direct(messages: List[Dict[str, Any]], debug: bool =
         'apikey': key,
         'Authorization': f'Bearer {key}',
         'Content-Type': 'application/json',
-        'Prefer': 'return=minimal'
+        'Prefer': 'resolution=ignore-duplicates, return=minimal'
     }
     
     endpoint = f"{url}/rest/v1/discord_messages"

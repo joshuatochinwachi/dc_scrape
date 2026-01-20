@@ -23,8 +23,9 @@ load_dotenv()
 nest_asyncio.apply()
 
 # --- ADVANCED ANTI-DETECTION CONFIGURATION ---
-CHANNELS = os.getenv("CHANNELS", "").split(",")
-CHANNELS = [c.strip() for c in CHANNELS if c.strip()]
+# CHANNELS = os.getenv("CHANNELS", "").split(",")
+# CHANNELS = [c.strip() for c in CHANNELS if c.strip()]
+from telegram_bot import cm # Import ChannelManager
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_ADMIN_ID = os.getenv("TELEGRAM_ADMIN_ID")
@@ -89,8 +90,8 @@ input_queue = queue.Queue()
 archiver_thread = None
 thread_lock = threading.Lock()
 
-if not CHANNELS:
-    logging.error("ERROR: CHANNELS environment variable not set.")
+if not cm.channels:
+    logging.error("ERROR: No channels configured in ChannelManager.")
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -245,18 +246,23 @@ def send_telegram_alert(subject, body, alert_type=None):
         return
     
     text = f"🎭 <b>STEALTH ALERT: {subject}</b>\n\n{body}"
-    try:
-        response = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_ADMIN_ID, "text": text, "parse_mode": "HTML"},
-            timeout=10
-        )
-        if response.status_code == 200:
-            log(f"✅ Alert sent: {subject}")
-            if alert_type:
-                archiver_state["last_alert_time"][alert_type] = time.time()
-    except Exception as e:
-        log(f"❌ Alert error: {str(e)}")
+    admin_ids = [id.strip() for id in TELEGRAM_ADMIN_ID.split(',') if id.strip()]
+    
+    for admin_id in admin_ids:
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={"chat_id": admin_id, "text": text, "parse_mode": "HTML"},
+                timeout=10
+            )
+            if response.status_code == 200:
+                log(f"✅ Alert sent to {admin_id}: {subject}")
+        except Exception as e:
+            log(f"❌ Alert error for {admin_id}: {str(e)}")
+
+    if alert_type:
+        archiver_state["last_alert_time"][alert_type] = time.time()
+
 
 def set_status(status):
     archiver_state["status"] = status
@@ -873,7 +879,15 @@ async def async_archiver_logic():
                         if wait_cycles % 10 == 0: log(f"⏳ {wait_cycles*5}s elapsed...")
 
                 # Shuffle channels for unpredictability
-                channels_to_check = CHANNELS.copy()
+                # DYNAMIC CHANNEL LOADING
+                cm.reload() # Sync from Supabase if needed
+                enabled_channels = cm.get_enabled_channels()
+                channels_to_check = [c['url'] for c in enabled_channels]
+                if not channels_to_check:
+                    log("⚠️ No enabled channels found in config. Waiting...")
+                    await asyncio.sleep(60)
+                    continue
+
                 random.shuffle(channels_to_check)
                 
                 # Randomly skip some channels sometimes (10% chance per channel)
@@ -967,7 +981,7 @@ async def async_archiver_logic():
                             current_ids.append(msg_id)
                             
                             if embed_data:
-                                title = embed_data.get('title', 'No title')[:40]
+                                title = (embed_data.get('title') or 'No title')[:40]
                                 log(f"   ✅ {title}...")
                                 if embed_data.get('links'):
                                     log(f"      🔗 {len(embed_data['links'])} link(s)")
@@ -987,8 +1001,11 @@ async def async_archiver_logic():
                         await smart_delay(CHANNEL_DELAY_MIN, CHANNEL_DELAY_MAX)
 
                     except Exception as e:
-                        log(f"   ⚠️ {str(e)[:80]}")
-                        track_channel_error(channel_url, str(e))
+                        import traceback
+                        tb = traceback.format_exc()
+                        log(f"   ⚠️ Exception in channel loop: {str(e)}")
+                        log(f"   🔴 Traceback:\n{tb}")
+                        track_channel_error(channel_url, f"{str(e)}\n\nTraceback:\n{tb}")
                         await smart_delay(4, 8)
 
                 # Randomized next check interval

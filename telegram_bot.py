@@ -1,4 +1,5 @@
 import os
+import time
 import json
 import logging
 import threading
@@ -610,6 +611,43 @@ class SubscriptionManager:
         except Exception as e:
             logger.warning(f"⚠️ Failed to download users from Supabase: {e}")
             
+    def get_user_categories(self, user_id: str) -> List[str]:
+        """Get enabled categories for a user (default to all if not set)"""
+        uid = str(user_id)
+        if uid not in self.users: return []
+        
+        # If no preference set, default to ALL available categories
+        user_cats = self.users[uid].get("subscribed_categories")
+        if user_cats is None:
+            return cm.get_categories()
+        return user_cats
+
+    def toggle_category(self, user_id: str, category: str) -> bool:
+        """Toggle a category for a user"""
+        with self.lock:
+            uid = str(user_id)
+            if uid not in self.users: return False
+            
+            current_cats = self.users[uid].get("subscribed_categories")
+            if current_cats is None:
+                # Initialize with all categories first, then remove the toggled one
+                all_cats = cm.get_categories()
+                if category in all_cats:
+                    all_cats.remove(category)
+                self.users[uid]["subscribed_categories"] = all_cats
+                new_state = False
+            else:
+                if category in current_cats:
+                    current_cats.remove(category)
+                    new_state = False
+                else:
+                    current_cats.append(category)
+                    new_state = True
+                self.users[uid]["subscribed_categories"] = current_cats
+            
+            self._sync_state()
+            return new_state
+            
         if not users_loaded and os.path.exists(self.local_users_path):
             try:
                 with open(self.local_users_path, 'r') as f:
@@ -1017,6 +1055,99 @@ class MessagePoller:
         self._save_cursor()
 
 
+
+# --- CHANNEL MANAGER ---
+
+class ChannelManager:
+    def __init__(self):
+        self.channels: List[Dict] = []
+        self.lock = threading.Lock()
+        self.local_path = "data/channels.json"
+        self.remote_path = "discord_josh/channels.json"
+        self.last_sync = 0
+        os.makedirs("data", exist_ok=True)
+        self.reload(force=True)
+
+        # Pre-populate if empty (Migration)
+        if not self.channels:
+            initial_channels = [
+                {"id": "1367813504786108526", "name": "Collectors Amazon", "url": "https://discord.com/channels/1367813504786108526/1367813504786108526", "category": "UK Stores", "enabled": True},
+                {"id": "855164313006505994", "name": "Argos Instore", "url": "https://discord.com/channels/855164313006505994/855164313006505994", "category": "UK Stores", "enabled": True},
+                {"id": "864504557903937587", "name": "Restocks Online", "url": "https://discord.com/channels/864504557903937587/864504557903937587", "category": "UK Stores", "enabled": True}
+            ]
+            self.channels = initial_channels
+            self._sync_state()
+
+    def reload(self, force=False):
+        """Reload channels from Supabase if more than 5 mins passed or forced"""
+        now = time.time()
+        if not force and (now - self.last_sync < 300):
+            return
+            
+        try:
+            data = supabase_utils.download_file(self.local_path, self.remote_path, SUPABASE_BUCKET)
+            if data:
+                self.channels = json.loads(data)
+                self.last_sync = now
+                logger.info(f"✅ Reloaded {len(self.channels)} channels from Supabase")
+        except: pass
+        
+        if not self.channels and os.path.exists(self.local_path):
+            try:
+                with open(self.local_path, 'r') as f: 
+                    self.channels = json.load(f)
+                    self.last_sync = now
+            except: pass
+
+    def _sync_state(self):
+        try:
+            with open(self.local_path, 'w') as f: json.dump(self.channels, f, indent=2)
+            supabase_utils.upload_file(self.local_path, SUPABASE_BUCKET, self.remote_path, debug=False)
+        except Exception as e:
+            logger.error(f"Channel sync error: {e}")
+
+    def add_channel(self, url: str, category: str, name: str) -> bool:
+        """Add a new channel"""
+        with self.lock:
+            # Extract ID from URL
+            # Format: .../channels/GUILD_ID/CHANNEL_ID
+            # Or just CHANNEL_ID if direct
+            chan_id = url.strip('/').split('/')[-1]
+            if not chan_id.isdigit(): return False
+            
+            # Check for duplicate
+            if any(c['id'] == chan_id for c in self.channels):
+                return False
+                
+            self.channels.append({
+                "id": chan_id,
+                "name": name,
+                "url": url,
+                "category": category,
+                "enabled": True
+            })
+            self._sync_state()
+            return True
+
+    def remove_channel(self, chan_id: str) -> bool:
+        """Remove a channel by ID"""
+        with self.lock:
+            initial_len = len(self.channels)
+            self.channels = [c for c in self.channels if c['id'] != str(chan_id)]
+            if len(self.channels) < initial_len:
+                self._sync_state()
+                return True
+            return False
+
+    def get_enabled_channels(self) -> List[Dict]:
+        return [c for c in self.channels if c.get('enabled', True)]
+
+    def get_categories(self) -> List[str]:
+        """Get list of unique categories"""
+        cats = set(c.get('category', 'Uncategorized') for c in self.channels)
+        return sorted(list(cats))
+
+cm = ChannelManager()
 sm = SubscriptionManager()
 poller = MessagePoller()
 
@@ -1051,7 +1182,8 @@ PHRASES_TO_REMOVE = [
     "CCN 2.0 | Profitable Pinger",
     "@Unfiltered",
     "CCN",
-    "@Product Flips"
+    "@Product Flips",
+    "Experimental software. AI can be inaccurate, DYOR!"
 ]
 
 # Regex patterns to remove (for dynamic content like timestamps)
@@ -1172,19 +1304,20 @@ def _format_collectors_amazon(msg_data: Dict, embed: Dict) -> Tuple[List[str], L
     lines = []
     keyboard = []
     
-    # 1. Header & Title (Retailer or Author)
-    author_name = msg_data.get("raw_data", {}).get("author", {}).get("name")
-    if not author_name and embed.get("author"):
-        author_name = embed["author"].get("name")
+    # 1. Header & Title (Retailer or Author) - DISABLED PER USER REQUEST
+    # author_name = msg_data.get("raw_data", {}).get("author", {}).get("name")
+    # if not author_name and embed.get("author"):
+    #     author_name = embed["author"].get("name")
         
-    if author_name and "unknown" not in author_name.lower():
-        lines.append(f"🏪 <b>{clean_text(author_name)}</b>")
-        lines.append("")
+    # if author_name and "unknown" not in author_name.lower():
+    #     lines.append(f"🏪 <b>{clean_text(author_name)}</b>")
+    #     lines.append("")
 
-    title = clean_text(embed.get("title", "Product Alert"))
-    lines.append(f"📦 <b>{title}</b>")
-    lines.append("━━━━━━━━━━━━━━━")
-    lines.append("")
+    title = clean_text(embed.get("title"))
+    if title and title != "None":
+        lines.append(f"📦 <b>{title}</b>")
+        lines.append("━━━━━━━━━━━━━━━")
+        lines.append("")
     
     # 2. ALL Fields (comprehensive)
     fields = embed.get("fields", [])
@@ -1225,13 +1358,14 @@ def _format_argos(msg_data: Dict, embed: Dict) -> Tuple[List[str], List[List[Inl
     """Formatter for Argos Instore (Channel 855...)"""
     lines = []
     
-    lines.append("🏪 <b>Argos Instore</b>")
-    lines.append("")
+    # lines.append("🏪 <b>Argos Instore</b>")
+    # lines.append("")
     
-    title = clean_text(embed.get("title", "Item Restock"))
-    lines.append(f"📦 <b>{title}</b>")
-    lines.append("━━━━━━━━━━━━━━━")
-    lines.append("")
+    title = clean_text(embed.get("title"))
+    if title and title != "None":
+        lines.append(f"📦 <b>{title}</b>")
+        lines.append("━━━━━━━━━━━━━━━")
+        lines.append("")
     
     # Display ALL fields
     fields = embed.get("fields", [])
@@ -1287,13 +1421,14 @@ def _format_restocks_currys(msg_data: Dict, embed: Dict) -> Tuple[List[str], Lis
             site = site.replace("**", "").strip()
         except: pass
         
-    lines.append(f"⚡ <b>{site.upper()}</b>")
-    lines.append("")
+    # lines.append(f"⚡ <b>{site.upper()}</b>")
+    # lines.append("")
     
-    title = clean_text(embed.get("title", "Product"))
-    lines.append(f"📦 <b>{title}</b>")
-    lines.append("━━━━━━━━━━━━━━━")
-    lines.append("")
+    title = clean_text(embed.get("title"))
+    if title and title != "None":
+        lines.append(f"📦 <b>{title}</b>")
+        lines.append("━━━━━━━━━━━━━━━")
+        lines.append("")
     
     # Display ALL fields with smart prioritization
     seen_values = set()
@@ -1360,24 +1495,24 @@ def format_telegram_message(msg_data: Dict) -> Tuple[str, Optional[str], Optiona
             custom_buttons.extend(b)
         else:
             # === FALLBACK/GENERIC FORMATTER (Original Logic Refined) ===
-            # RETAILER/SOURCE
-            retailer = None
-            if embed.get("author"):
-                retailer = clean_text(embed["author"].get("name"))
-            elif tag_info.get("brand"):
-                retailer = clean_text(tag_info["brand"])
+            # RETAILER/SOURCE - DISABLED PER USER REQUEST
+            # retailer = None
+            # if embed.get("author"):
+            #     retailer = clean_text(embed["author"].get("name"))
+            # elif tag_info.get("brand"):
+            #     retailer = clean_text(tag_info["brand"])
             
-            if retailer and "unknown" not in retailer.lower():
-                lines.append(f"🏪 <b>{retailer}</b>")
-                lines.append("")
+            # if retailer and "unknown" not in retailer.lower():
+            #     lines.append(f"🏪 <b>{retailer}</b>")
+            #     lines.append("")
             
             # TITLE
-            title = clean_text(embed.get("title") or tag_info.get("product_code") or "Product Alert")
-            if tag_info.get("region"): title = f"[{tag_info['region']}] {title}"
-            
-            lines.append(f"📦 <b>{title}</b>")
-            lines.append("━━━━━━━━━━━━━━━")
-            lines.append("")
+            title = clean_text(embed.get("title") or tag_info.get("product_code"))
+            if title and title != "None":
+                if tag_info.get("region"): title = f"[{tag_info['region']}] {title}"
+                lines.append(f"📦 <b>{title}</b>")
+                lines.append("━━━━━━━━━━━━━━━")
+                lines.append("")
             
             # DESC
             if embed.get("description"):
@@ -1726,6 +1861,7 @@ def create_main_menu() -> InlineKeyboardMarkup:
     """Create main menu keyboard"""
     keyboard = [
         [InlineKeyboardButton("📊 My Status", callback_data="status")],
+        [InlineKeyboardButton("⚙️ Alert Settings", callback_data="settings")],
         [InlineKeyboardButton("🔔 Toggle Alerts", callback_data="toggle_pause")],
         [InlineKeyboardButton("🎟️ Redeem Code", callback_data="redeem")],
         [InlineKeyboardButton("❓ Help", callback_data="help")]
@@ -1972,6 +2108,57 @@ Get a code from your administrator!
         buttons = []
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=create_menu_with_back(buttons, "main"))
     
+    elif action == "settings":
+        if not sm.is_active(user_id):
+            text = "❌ <b>Not Subscribed</b>\n\nUse /start to redeem a code!"
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=create_menu_with_back([], "main"))
+            return
+
+        all_cats = cm.get_categories()
+        user_cats = sm.get_user_categories(user_id)
+        
+        text = "⚙️ <b>Alert Category Settings</b>\n\nTap to toggle categories on/off:"
+        
+        buttons = []
+        for cat in all_cats:
+            is_enabled = cat in user_cats
+            status_icon = "✅" if is_enabled else "❌"
+            # Display with spaces, but keep underscores in callback_data if they exist
+            display_name = cat.replace("_", " ")
+            buttons.append([InlineKeyboardButton(f"{status_icon} {display_name}", callback_data=f"toggle_cat:{cat}")])
+            
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=create_menu_with_back(buttons, "main"))
+
+    elif action.startswith("toggle_cat:"):
+        max_retries = 3
+        for i in range(max_retries):
+            try:
+                cat_to_toggle = action.split(":", 1)[1]
+                new_state = sm.toggle_category(user_id, cat_to_toggle)
+                
+                # Refresh the menu to show new state
+                all_cats = cm.get_categories()
+                user_cats = sm.get_user_categories(user_id)
+                
+                buttons = []
+                for cat in all_cats:
+                    is_enabled = cat in user_cats
+                    status_icon = "✅" if is_enabled else "❌"
+                    display_name = cat.replace("_", " ")
+                    buttons.append([InlineKeyboardButton(f"{status_icon} {display_name}", callback_data=f"toggle_cat:{cat}")])
+                
+                await query.edit_message_text(
+                    "⚙️ <b>Alert Category Settings</b>\n\nTap to toggle categories on/off:",
+                    parse_mode=ParseMode.HTML, 
+                    reply_markup=create_menu_with_back(buttons, "main")
+                )
+                break 
+            except Exception as e:
+                # If message is not modified (user clicked same filter twice fast), ignore
+                if "Message is not modified" in str(e):
+                    break
+                logger.error(f"Toggle error: {e}")
+                
     elif action == "help":
         text = """
 ❓ <b>Help & Information</b>
@@ -2076,6 +2263,75 @@ async def remove_bot_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ User <code>{target_id}</code> is no longer an admin.", parse_mode=ParseMode.HTML)
     else:
         await update.message.reply_text(f"❌ User <code>{target_id}</code> not found or not an admin.", parse_mode=ParseMode.HTML)
+
+async def add_channel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: Add a new channel to scrape"""
+    if not is_admin(update.effective_user.id): 
+        await update.message.reply_text("⛔ Admin only.")
+        return
+
+    # Usage: /add_channel <url> <category> <name...>
+    if not context.args or len(context.args) < 3:
+        await update.message.reply_text(
+            "Usage: /add_channel <url> <category> <name>\n"
+            "Example: /add_channel https://discord.com/.../12345 USA_Stores Target USA",
+            disable_web_page_preview=True
+        )
+        return
+
+    url = context.args[0]
+    category = context.args[1].replace("_", " ") # Allow underscores for spaces in cat
+    name = " ".join(context.args[2:])
+
+    if cm.add_channel(url, category, name):
+        await update.message.reply_text(
+            f"✅ <b>Channel Added!</b>\n\n"
+            f"📝 Name: {name}\n"
+            f"📂 Category: {category}\n"
+            f"🔗 ID: {url.split('/')[-1]}",
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
+        )
+    else:
+        await update.message.reply_text("❌ Failed to add channel. Check URL or if duplicate.")
+
+async def remove_channel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: Remove a channel"""
+    if not is_admin(update.effective_user.id): return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /remove_channel <channel_id>")
+        return
+    
+    chan_id = context.args[0]
+    if cm.remove_channel(chan_id):
+        await update.message.reply_text(f"✅ Channel <code>{chan_id}</code> removed.", parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text("❌ Channel ID not found.", parse_mode=ParseMode.HTML)
+
+async def list_channels_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: List all channels"""
+    if not is_admin(update.effective_user.id): return
+
+    channels = cm.get_enabled_channels()
+    if not channels:
+        await update.message.reply_text("ℹ️ No channels configured.")
+        return
+
+    text = "📺 <b>Configured Channels</b>\n\n"
+    current_cat = None
+    
+    # Sort by category then name
+    sorted_chans = sorted(channels, key=lambda x: (x.get('category', 'Z'), x['name']))
+    
+    for c in sorted_chans:
+        cat = c.get('category', 'Uncategorized').replace("_", " ")
+        if cat != current_cat:
+            text += f"📂 <b>{cat}</b>\n"
+            current_cat = cat
+        text += f"• {c['name']} (<code>{c['id']}</code>)\n"
+
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 async def broadcast_job(context: ContextTypes.DEFAULT_TYPE):
     """
@@ -2295,7 +2551,26 @@ async def _broadcast_job_inner(context: ContextTypes.DEFAULT_TYPE):
         sent_count = 0
         failed_count = 0
         
+        # Determine Message Category
+        msg_channel_id = str(msg.get("channel_id"))
+        # We need to find the category for this channel ID
+        # Since we only have the ID here, we search the CM
+        msg_category = "Uncategorized" 
+        for c in cm.channels:
+            if c['id'] == msg_channel_id:
+                msg_category = c.get('category', 'Uncategorized')
+                break
+        
+        # Send to all active users with rate limiting
+        sent_count = 0
+        failed_count = 0
+        
         for uid in active_users:
+            # CHECK CATEGORY SUBSCRIPTION
+            user_cats = sm.get_user_categories(uid)
+            if msg_category not in user_cats:
+                continue
+
             try:
                 # Send with timeout protection
                 if photo_data:
@@ -2418,6 +2693,9 @@ SUPERADMIN_COMMANDS = [
     BotCommand("test", "Test recent alerts (e.g., /test 5)"),
     BotCommand("add_admin", "Add a user as admin (e.g., /add_admin 123456)"),
     BotCommand("remove_admin", "Remove admin status (e.g., /remove_admin 123456)"),
+    BotCommand("add_channel", "Add scraper channel"),
+    BotCommand("remove_channel", "Remove scraper channel"),
+    BotCommand("channels", "List all channels"),
 ]
 
 async def setup_bot_commands(application: Application) -> None:
@@ -2470,6 +2748,11 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /gen [days] - Generate subscription code
 /test [count] - Test recent alerts
 
+<b>Channel Management:</b>
+/add_channel [url] [category] [name] - Add scraper
+/remove_channel [id] - Remove scraper
+/channels - List all channels
+
 <b>User Management:</b>
 /add_admin [user_id] - Add an admin
 /remove_admin [user_id] - Remove an admin
@@ -2485,6 +2768,11 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 <b>Admin Tools:</b>
 /gen [days] - Generate subscription code
 /test [count] - Test recent alerts
+
+<b>Channel Management:</b>
+/add_channel [url] [category] [name] - Add scraper
+/remove_channel [id] - Remove scraper
+/channels - List all channels
 """
     else:
         menu_text = """
@@ -2525,6 +2813,9 @@ def run_bot():
         app.add_handler(CommandHandler("add_admin", add_bot_admin))
         app.add_handler(CommandHandler("remove_admin", remove_bot_admin))
         app.add_handler(CommandHandler("test", test_alerts))
+        app.add_handler(CommandHandler("add_channel", add_channel_cmd))
+        app.add_handler(CommandHandler("remove_channel", remove_channel_cmd))
+        app.add_handler(CommandHandler("channels", list_channels_cmd))
         app.add_handler(CommandHandler("help", show_help))  # Help command
         app.add_handler(CallbackQueryHandler(button_handler))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
