@@ -1897,7 +1897,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if menu_to_go == "main":
             # Show the same welcome content as /start
             welcome_text = f"""
-👋 <b>Welcome to KTTYDROPS!</b>
+👋 <b>Welcome to Hollowscan!</b>
 
 Hello {username}! Get instant product alerts with all the data you need.
 
@@ -2133,7 +2133,7 @@ async def expiry_reminder_job(context: ContextTypes.DEFAULT_TYPE):
     reminder_text = """
 ⚠️ <b>Subscription Expired</b>
 
-Your access to KTTYDROPS has expired. 
+Your access to Hollowscan has expired. 
 
 To continue receiving real-time notifications with product images and direct links, please redeem a new subscription code.
 
@@ -2179,7 +2179,7 @@ async def potential_user_reminder_job(context: ContextTypes.DEFAULT_TYPE):
     reminder_text = """
 👋 <b>Ready to get started?</b>
 
-You recently checked out KTTYDROPS but haven't activated your subscription yet. 
+You recently checked out Hollowscan but haven't activated your subscription yet. 
 
 <b>Why subscribe?</b>
 • ⚡ <b>Instant Alerts:</b> Be the first to know about product drops.
