@@ -5,6 +5,7 @@ import threading
 import queue
 import base64
 import logging
+import traceback
 import requests
 import asyncio
 import nest_asyncio
@@ -238,7 +239,7 @@ def should_send_alert(alert_type):
     last_alert = archiver_state["last_alert_time"].get(alert_type, 0)
     return time.time() - last_alert > ALERT_COOLDOWN
 
-def send_telegram_alert(subject, body, alert_type=None):
+def send_telegram_alert(subject, body, alert_type=None, image_bytes=None):
     if not TELEGRAM_TOKEN or not TELEGRAM_ADMIN_ID:
         log(f"📧 Alert: {subject} (Telegram not configured)")
         return
@@ -250,13 +251,25 @@ def send_telegram_alert(subject, body, alert_type=None):
     
     for admin_id in admin_ids:
         try:
-            response = requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                json={"chat_id": admin_id, "text": text, "parse_mode": "HTML"},
-                timeout=10
-            )
+            if image_bytes:
+                # Send as photo
+                url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+                files = {'photo': ('screenshot.jpg', image_bytes, 'image/jpeg')}
+                data = {'chat_id': admin_id, 'caption': text[:1024], 'parse_mode': 'HTML'}
+                response = requests.post(url, data=data, files=files, timeout=20)
+            else:
+                # Send as text
+                url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+                response = requests.post(
+                    url,
+                    json={"chat_id": admin_id, "text": text, "parse_mode": "HTML"},
+                    timeout=10
+                )
+            
             if response.status_code == 200:
                 log(f"✅ Alert sent to {admin_id}: {subject}")
+            else:
+                log(f"❌ Alert failed for {admin_id}: {response.status_code} {response.text}")
         except Exception as e:
             log(f"❌ Alert error for {admin_id}: {str(e)}")
 
@@ -455,11 +468,11 @@ async def save_message_html_for_inspection(message_element, message_id):
         log(f"   ⚠️ HTML save error: {e}")
         return None
 
-def track_channel_error(channel_url, error_msg):
+def track_channel_error(channel_url, error_msg, image_bytes=None):
     archiver_state["error_counts"][channel_url] = archiver_state["error_counts"].get(channel_url, 0) + 1
     if archiver_state["error_counts"][channel_url] >= ERROR_THRESHOLD:
         alert_type = f"channel_error_{channel_url}"
-        send_telegram_alert(f"Channel Access Failed", f"Channel: {channel_url}\nError: {error_msg}", alert_type)
+        send_telegram_alert(f"Channel Access Failed", f"Channel: {channel_url}\nError: {error_msg}", alert_type, image_bytes=image_bytes)
 
 def track_channel_success(channel_url):
     archiver_state["error_counts"][channel_url] = 0
@@ -662,24 +675,29 @@ async def wait_for_messages_to_load(page):
         '[id^="message-content-"]',
         'div[class*="messageContent-"]',
         '[data-list-item-id^="chat-messages"]',
+        'article[class*="message-"]',
+        '[role="listitem"]',
     ]
     
     log("   🔍 Loading messages...")
     try:
-        await page.wait_for_selector('main[class*="chatContent"], div[class*="chat-"]', timeout=5000)
+        # Increase timeout and wait for a more generic chat container
+        await page.wait_for_selector('main[class*="chatContent"], div[class*="chat-"], [class*="messagesWrapper-"]', timeout=30000)
     except: pass
     
-    for attempt in range(3):
+    for attempt in range(5): # Increase attempts
         await page.evaluate("window.scrollTo(0, 0)")
-        await smart_delay(0.4, 1.0)
+        await smart_delay(0.5, 1.5)
         for selector in SELECTORS:
             try:
                 elements = page.locator(selector)
                 if await elements.count() > 0:
                     return selector, elements
             except: continue
+        
+        # If not found, scroll to bottom and wait a bit longer
         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        await smart_delay(0.4, 1.0)
+        await smart_delay(1.0, 2.0)
     
     return None, None
 
@@ -900,6 +918,14 @@ async def async_archiver_logic():
                 for channel_url in channels_to_check:
                     if stop_event.is_set(): break
                     
+                    # Persistent failure check
+                    if archiver_state["error_counts"].get(channel_url, 0) > 2:
+                        log(f"   🔄 Channel {channel_url.split('/')[-1]} has high error count. Hard refreshing...")
+                        try:
+                            await page.reload(timeout=30000)
+                            await smart_delay(5, 10)
+                        except: pass
+
                     archiver_state["total_checks"] += 1
                     log(f"📂 [{archiver_state['total_checks']}] {channel_url.split('/')[-1]}")
                     
@@ -925,7 +951,15 @@ async def async_archiver_logic():
                         selector, messages = await wait_for_messages_to_load(page)
                         if not messages:
                             log("   ⚠️ No messages")
-                            track_channel_error(channel_url, "No messages")
+                            # Diagnostic info
+                            page_title = await page.title()
+                            page_url = page.url
+                            err_screenshot = None
+                            try:
+                                err_screenshot = await page.screenshot(quality=70, type='jpeg')
+                            except: pass
+                            
+                            track_channel_error(channel_url, f"No messages found.\nURL: {page_url}\nTitle: {page_title}", image_bytes=err_screenshot)
                             await smart_delay(CHANNEL_DELAY_MIN, CHANNEL_DELAY_MAX)
                             continue
                         
@@ -1004,8 +1038,18 @@ async def async_archiver_logic():
                         import traceback
                         tb = traceback.format_exc()
                         log(f"   ⚠️ Exception in channel loop: {str(e)}")
-                        log(f"   🔴 Traceback:\n{tb}")
-                        track_channel_error(channel_url, f"{str(e)}\n\nTraceback:\n{tb}")
+                        
+                        # Diagnostic info
+                        page_title = "Unknown"
+                        page_url = channel_url
+                        err_screenshot = None
+                        try:
+                            page_title = await page.title()
+                            page_url = page.url
+                            err_screenshot = await page.screenshot(quality=70, type='jpeg')
+                        except: pass
+                        
+                        track_channel_error(channel_url, f"{str(e)}\nURL: {page_url}\nTitle: {page_title}\n\nTraceback:\n{tb}", image_bytes=err_screenshot)
                         await smart_delay(4, 8)
 
                 # Randomized next check interval

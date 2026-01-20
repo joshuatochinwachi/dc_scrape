@@ -23,7 +23,10 @@ from PIL import Image
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-ADMIN_USER_ID = os.getenv("TELEGRAM_ADMIN_ID")
+# Support multiple admin IDs (comma-separated)
+ADMIN_USER_IDS = [id.strip() for id in os.getenv("TELEGRAM_ADMIN_ID", "").split(",") if id.strip()]
+# For backward compatibility
+ADMIN_USER_ID = ADMIN_USER_IDS[0] if ADMIN_USER_IDS else None
 SUPABASE_BUCKET = "monitor-data"
 USERS_FILE = "bot_users.json"
 CODES_FILE = "active_codes.json"
@@ -1071,9 +1074,9 @@ class ChannelManager:
         # Pre-populate if empty (Migration)
         if not self.channels:
             initial_channels = [
-                {"id": "1367813504786108526", "name": "Collectors Amazon", "url": "https://discord.com/channels/1367813504786108526/1367813504786108526", "category": "UK Stores", "enabled": True},
-                {"id": "855164313006505994", "name": "Argos Instore", "url": "https://discord.com/channels/855164313006505994/855164313006505994", "category": "UK Stores", "enabled": True},
-                {"id": "864504557903937587", "name": "Restocks Online", "url": "https://discord.com/channels/864504557903937587/864504557903937587", "category": "UK Stores", "enabled": True}
+                {"id": "1367813504786108526", "name": "Collectors Amazon", "url": "https://discord.com/channels/653646362453213205/1367813504786108526", "category": "UK Stores", "enabled": True},
+                {"id": "855164313006505994", "name": "Argos Instore", "url": "https://discord.com/channels/653646362453213205/855164313006505994", "category": "UK Stores", "enabled": True},
+                {"id": "864504557903937587", "name": "Restocks Online", "url": "https://discord.com/channels/653646362453213205/864504557903937587", "category": "UK Stores", "enabled": True}
             ]
             self.channels = initial_channels
             self._sync_state()
@@ -1154,11 +1157,12 @@ poller = MessagePoller()
 # --- ADMIN PERMISSION HELPERS ---
 
 def is_superadmin(user_id: str) -> bool:
-    """Check if user is the main admin from .env"""
-    return str(user_id) == str(ADMIN_USER_ID)
+    """Check if user is one of the main admins from .env"""
+    uid_str = str(user_id)
+    return uid_str in ADMIN_USER_IDS
 
 def is_admin(user_id: str) -> bool:
-    """Check if user is either superadmin or secondary admin"""
+    """Check if user is either a superadmin or secondary admin"""
     uid_str = str(user_id)
     return is_superadmin(uid_str) or sm.is_bot_admin(uid_str)
 
@@ -2233,6 +2237,7 @@ Use /start for the menu.
 async def gen_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin: Generate codes"""
     if not is_admin(update.effective_user.id): 
+        await update.message.reply_text("⛔ Admin only.")
         return
     
     try:
@@ -2310,7 +2315,9 @@ async def add_channel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def remove_channel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin: Remove a channel"""
-    if not is_admin(update.effective_user.id): return
+    if not is_admin(update.effective_user.id): 
+        await update.message.reply_text("⛔ Admin only.")
+        return
 
     if not context.args:
         await update.message.reply_text("Usage: /remove_channel <channel_id>")
@@ -2324,7 +2331,9 @@ async def remove_channel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def list_channels_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin: List all channels"""
-    if not is_admin(update.effective_user.id): return
+    if not is_admin(update.effective_user.id): 
+        await update.message.reply_text("⛔ Admin only.")
+        return
 
     channels = cm.get_enabled_channels()
     if not channels:
@@ -2696,6 +2705,9 @@ ADMIN_COMMANDS = [
     BotCommand("help", "Show available commands"),
     BotCommand("gen", "Generate subscription code (e.g., /gen 30)"),
     BotCommand("test", "Test recent alerts (e.g., /test 5)"),
+    BotCommand("add_channel", "Add scraper channel"),
+    BotCommand("remove_channel", "Remove scraper channel"),
+    BotCommand("channels", "List all channels"),
 ]
 
 # Additional commands for superadmin
@@ -2711,15 +2723,30 @@ SUPERADMIN_COMMANDS = [
     BotCommand("channels", "List all channels"),
 ]
 
-async def setup_bot_commands(application: Application) -> None:
-    """Set up command menus for different user roles"""
+async def setup_bot_commands(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Set up command menus for different user roles (Run as Job)"""
+    application = context.application
     try:
-        # Set default commands for all users
+        logger.info("🛠️ Setting up command menus...")
+        # 1. Set default commands for all users
         await application.bot.set_my_commands(DEFAULT_COMMANDS, scope=BotCommandScopeDefault())
         logger.info("   ✅ Default command menu set")
         
-        # Set admin commands for secondary admins
+        # 2. Set SUPERADMIN_COMMANDS for IDs in .env
+        for admin_id in ADMIN_USER_IDS:
+            try:
+                await application.bot.set_my_commands(
+                    SUPERADMIN_COMMANDS, 
+                    scope=BotCommandScopeChat(chat_id=int(admin_id))
+                )
+                logger.info(f"   ✅ Superadmin menu set for .env user {admin_id}")
+            except Exception as e:
+                logger.debug(f"   Could not set superadmin menu for {admin_id}: {e}")
+
+        # 3. Set ADMIN_COMMANDS for secondary admins Managed by bot
         for user_id, user_data in sm.users.items():
+            if user_id in ADMIN_USER_IDS: continue # Skip if already set as superadmin
+            
             if user_data.get("is_admin", False):
                 try:
                     await application.bot.set_my_commands(
@@ -2729,17 +2756,9 @@ async def setup_bot_commands(application: Application) -> None:
                     logger.info(f"   ✅ Admin menu set for user {user_id}")
                 except Exception as e:
                     logger.debug(f"   Could not set admin menu for {user_id}: {e}")
-        
-        # Set superadmin commands
-        if ADMIN_USER_ID:
-            try:
-                await application.bot.set_my_commands(
-                    SUPERADMIN_COMMANDS, 
-                    scope=BotCommandScopeChat(chat_id=int(ADMIN_USER_ID))
-                )
-                logger.info(f"   ✅ Superadmin menu set for {ADMIN_USER_ID}")
-            except Exception as e:
-                logger.debug(f"   Could not set superadmin menu: {e}")
+                
+                # Small delay to avoid rate limits
+                await asyncio.sleep(0.5)
                 
     except Exception as e:
         logger.error(f"   ❌ Failed to set command menus: {e}")
@@ -2818,7 +2837,7 @@ def run_bot():
         logger.info(f"   Poll Interval: {POLL_INTERVAL} seconds")
         logger.info(f"   Max Runtime: {MAX_JOB_RUNTIME} seconds")
         
-        app = Application.builder().token(TELEGRAM_TOKEN).post_init(setup_bot_commands).build()
+        app = Application.builder().token(TELEGRAM_TOKEN).build()
         
         # Command Handlers
         app.add_handler(CommandHandler("start", start))
@@ -2856,6 +2875,8 @@ def run_bot():
                 interval=86400, # Once a day
                 first=60        # Start after 60 seconds
             )
+            # Register menu setup (One-time, 5s after startup)
+            app.job_queue.run_once(setup_bot_commands, when=5)
             
             logger.info(f"   ✅ Job queue running (poll every {POLL_INTERVAL}s)")
         
