@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 from telegram.constants import ParseMode
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from bs4 import BeautifulSoup
 import supabase_utils
 from dotenv import load_dotenv
@@ -742,6 +742,33 @@ class SubscriptionManager:
                             active.append(uid)
                 except: pass
         return active
+    
+    def get_all_users(self) -> List[str]:
+        """Get all known users (subscribed + potential)"""
+        all_ids = set()
+        with self.lock:
+            all_ids.update(self.users.keys())
+            all_ids.update(self.potential_users.keys())
+        return list(all_ids)
+
+    def get_expired_users(self) -> List[str]:
+        """Get users with expired subscriptions"""
+        expired = []
+        now = datetime.utcnow()
+        with self.lock:
+            for uid, data in self.users.items():
+                try:
+                    expiry = parse_iso_datetime(data["expiry"])
+                    if expiry < now:
+                        expired.append(uid)
+                except: 
+                    pass
+        return expired
+
+    def get_potential_users_list(self) -> List[str]:
+        """Get list of potential users"""
+        with self.lock:
+            return list(self.potential_users.keys())
     
     def get_expiry(self, user_id: str):
         return self.users.get(str(user_id), {}).get("expiry")
@@ -2813,6 +2840,192 @@ async def setup_bot_commands(context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         logger.error(f"   ❌ Failed to set command menus: {e}")
 
+# --- BROADCAST FEATURE ---
+
+BROADCAST_TARGET, BROADCAST_MESSAGE, BROADCAST_CONFIRM = range(3)
+
+async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start the broadcast conversation"""
+    user_id = str(update.effective_user.id)
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ You are not authorized to use this command.")
+        return ConversationHandler.END
+
+    keyboard = [
+        [
+            InlineKeyboardButton("All Users", callback_data="target_all"),
+            InlineKeyboardButton("Active Users", callback_data="target_active")
+        ],
+        [
+            InlineKeyboardButton("Expired Users", callback_data="target_expired"),
+            InlineKeyboardButton("Potential Users", callback_data="target_potential")
+        ],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "📢 <b>Broadcast Wizard</b>\n\nSelect the target audience for your broadcast:",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.HTML
+    )
+    return BROADCAST_TARGET
+
+async def broadcast_target(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle target selection"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "cancel":
+        await query.edit_message_text("❌ Broadcast cancelled.")
+        return ConversationHandler.END
+        
+    target = query.data.replace("target_", "")
+    context.user_data["broadcast_target"] = target
+    
+    target_names = {
+        "all": "All Users",
+        "active": "Active Subscribers",
+        "expired": "Expired Subscribers",
+        "potential": "Potential Users"
+    }
+    
+    await query.edit_message_text(
+        f"🎯 Target: <b>{target_names.get(target, target)}</b>\n\n"
+        "Now send the message you want to broadcast.\n"
+        "• You can send <b>Text</b> or a <b>Photo with Caption</b>.\n"
+        "• Supported formatting: <code>&lt;b&gt;bold&lt;/b&gt;</code>, <code>&lt;i&gt;italics&lt;/i&gt;</code>, <code>&lt;code&gt;copyable&lt;/code&gt;</code>.",
+        parse_mode=ParseMode.HTML
+    )
+    return BROADCAST_MESSAGE
+
+async def broadcast_message_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the broadcast content input"""
+    message = update.message
+    
+    # Store message details
+    if message.photo:
+        # Get the largest photo
+        file_id = message.photo[-1].file_id
+        caption = message.caption or ""
+        context.user_data["broadcast_content"] = {
+            "type": "photo",
+            "file_id": file_id,
+            "text": caption
+        }
+        
+        # Send preview
+        keyboard = [
+            [InlineKeyboardButton("✅ Send Broadcast", callback_data="confirm_send")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+        ]
+        await message.reply_photo(
+            photo=file_id,
+            caption=f"📢 <b>PREVIEW (Target: {context.user_data['broadcast_target']})</b>\n\n{caption}\n\n-------------------\nClick confirm to send.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+    elif message.text:
+        text = message.text
+        context.user_data["broadcast_content"] = {
+            "type": "text",
+            "text": text
+        }
+        
+        # Send preview
+        keyboard = [
+            [InlineKeyboardButton("✅ Send Broadcast", callback_data="confirm_send")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+        ]
+        await message.reply_text(
+            text=f"📢 <b>PREVIEW (Target: {context.user_data['broadcast_target']})</b>\n\n{text}\n\n-------------------\nClick confirm to send.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await message.reply_text("⚠️ Please send text or a photo.")
+        return BROADCAST_MESSAGE
+        
+    return BROADCAST_CONFIRM
+
+async def broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Execute the broadcast"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "cancel":
+        await query.edit_message_text("❌ Broadcast cancelled.")
+        return ConversationHandler.END
+    
+    target = context.user_data.get("broadcast_target")
+    content = context.user_data.get("broadcast_content")
+    
+    # Get recipients
+    recipients = []
+    if target == "all":
+        recipients = sm.get_all_users()
+    elif target == "active":
+        recipients = sm.get_active_users()
+    elif target == "expired":
+        recipients = sm.get_expired_users()
+    elif target == "potential":
+        recipients = sm.get_potential_users_list()
+    
+    # Check if we are editing a text message or a caption (if photo)
+    try:
+        if update.callback_query.message.photo:
+            # If the preview was a photo, we can't use edit_message_text easily on the caption 
+            # without keeping the photo, or we delete and send new.
+            # Best approach: Edit caption to show status
+            await query.edit_message_caption(caption=f"🚀 Sending broadcast to {len(recipients)} users...")
+        else:
+            await query.edit_message_text(f"🚀 Sending broadcast to {len(recipients)} users...")
+    except Exception as e:
+        # Fallback if editing fails (e.g. message too old or type mismatch)
+        logger.warning(f"Could not edit broadcast status message: {e}")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"🚀 Sending broadcast to {len(recipients)} users..."
+        )
+    
+    success_count = 0
+    fail_count = 0
+    
+    for user_id in recipients:
+        try:
+            if content["type"] == "photo":
+                await context.bot.send_photo(
+                    chat_id=user_id,
+                    photo=content["file_id"],
+                    caption=content["text"],
+                    parse_mode=ParseMode.HTML
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=content["text"],
+                    parse_mode=ParseMode.HTML
+                )
+            success_count += 1
+            await asyncio.sleep(0.05) # Rate limit protection
+        except Exception as e:
+            logger.warning(f"Failed to broadcast to {user_id}: {e}")
+            fail_count += 1
+            
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=f"✅ <b>Broadcast Complete</b>\n\nSuccessful: {success_count}\nFailed: {fail_count}",
+        parse_mode=ParseMode.HTML
+    )
+    
+    return ConversationHandler.END
+
+async def broadcast_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel conversation"""
+    await update.message.reply_text("❌ Broadcast cancelled.")
+    return ConversationHandler.END
+
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show available commands based on user role"""
     user_id = str(update.effective_user.id)
@@ -2890,6 +3103,21 @@ def run_bot():
         app = Application.builder().token(TELEGRAM_TOKEN).build()
         
         # Command Handlers
+        # Broadcast Handler
+        broadcast_handler = ConversationHandler(
+            entry_points=[CommandHandler("broadcast", broadcast_start)],
+            states={
+                BROADCAST_TARGET: [CallbackQueryHandler(broadcast_target)],
+                BROADCAST_MESSAGE: [MessageHandler(filters.TEXT | filters.PHOTO, broadcast_message_input)],
+                BROADCAST_CONFIRM: [CallbackQueryHandler(broadcast_confirm)],
+            },
+            fallbacks=[
+                CommandHandler("cancel", broadcast_cancel),
+                CallbackQueryHandler(broadcast_cancel, pattern="^cancel$")
+            ]
+        )
+        app.add_handler(broadcast_handler)
+
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("gen", gen_code))
         app.add_handler(CommandHandler("add_admin", add_bot_admin))
