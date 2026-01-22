@@ -665,29 +665,71 @@ class SubscriptionManager:
             return cm.get_categories()
         return user_cats
 
+    def get_disabled_subcategories(self, user_id: str) -> List[str]:
+        """Get list of disabled subcategory keys (Category:Subcategory)"""
+        uid = str(user_id)
+        if uid not in self.users: return []
+        return self.users[uid].get("disabled_subcategories", [])
+
+    def is_subscribed(self, user_id: str, category: str, subcategory: str) -> bool:
+        """Check if user is subscribed to both category and subcategory"""
+        uid = str(user_id)
+        if uid not in self.users: return False
+        
+        # 1. Check Category
+        enabled_cats = self.get_user_categories(uid)
+        if category not in enabled_cats:
+            return False
+            
+        # 2. Check Subcategory
+        disabled_subs = self.get_disabled_subcategories(uid)
+        sub_key = f"{category}:{subcategory}"
+        if sub_key in disabled_subs:
+            return False
+            
+        return True
+
     def toggle_category(self, user_id: str, category: str) -> bool:
         """Toggle a category for a user"""
         with self.lock:
             uid = str(user_id)
             if uid not in self.users: return False
             
-            current_cats = self.users[uid].get("subscribed_categories")
-            if current_cats is None:
-                # Initialize with all categories first, then remove the toggled one
-                all_cats = cm.get_categories()
-                if category in all_cats:
-                    all_cats.remove(category)
-                self.users[uid]["subscribed_categories"] = all_cats
+            if "subscribed_categories" not in self.users[uid]:
+                self.users[uid]["subscribed_categories"] = cm.get_categories()
+                
+            current_cats = self.users[uid]["subscribed_categories"]
+            if category in current_cats:
+                current_cats.remove(category)
                 new_state = False
             else:
-                if category in current_cats:
-                    current_cats.remove(category)
-                    new_state = False
-                else:
-                    current_cats.append(category)
-                    new_state = True
-                self.users[uid]["subscribed_categories"] = current_cats
+                current_cats.append(category)
+                new_state = True
             
+            self.users[uid]["subscribed_categories"] = current_cats
+            self._sync_state()
+            return new_state
+
+    def toggle_subcategory(self, user_id: str, category: str, subcategory: str) -> bool:
+        """Toggle a subcategory (stores Category:Subcategory in disabled_subcategories)"""
+        with self.lock:
+            uid = str(user_id)
+            if uid not in self.users: return False
+            
+            if "disabled_subcategories" not in self.users[uid]:
+                self.users[uid]["disabled_subcategories"] = []
+                
+            disabled_subs = self.users[uid]["disabled_subcategories"]
+            sub_key = f"{category}:{subcategory}"
+            
+            if sub_key in disabled_subs:
+                disabled_subs.remove(sub_key)
+                new_state = True # Now enabled
+            else:
+                disabled_subs.append(sub_key)
+                new_state = False # Now disabled
+                
+            self.users[uid]["disabled_subcategories"] = disabled_subs
             self._sync_state()
             return new_state
 
@@ -1178,6 +1220,11 @@ class ChannelManager:
         """Get list of unique categories"""
         cats = set(c.get('category', 'Uncategorized') for c in self.channels)
         return sorted(list(cats))
+
+    def get_subcategories(self, category: str) -> List[str]:
+        """Get list of store names for a category"""
+        subs = set(c.get('name', 'Unknown') for c in self.channels if c.get('category') == category)
+        return sorted(list(subs))
 
 cm = ChannelManager()
 sm = SubscriptionManager()
@@ -1980,17 +2027,18 @@ async def test_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         messages.reverse() 
         
         for msg in messages:
-            # CHECK CATEGORY SUBSCRIPTION
+            # CHECK CATEGORY & SUBCATEGORY SUBSCRIPTION
             msg_channel_id = str(msg.get("channel_id"))
             msg_category = "Uncategorized"
+            msg_subcategory = "Unknown"
             for c in cm.channels:
                 if c['id'] == msg_channel_id:
                     msg_category = c.get('category', 'Uncategorized')
+                    msg_subcategory = c.get('name', 'Unknown')
                     break
             
-            user_cats = sm.get_user_categories(user_id)
-            if msg_category not in user_cats:
-                logger.debug(f"   ⏭️ Skipping test alert for {user_id}: {msg_category} not in {user_cats}")
+            if not sm.is_subscribed(user_id, msg_category, msg_subcategory):
+                logger.debug(f"   ⏭️ Skipping test alert for {user_id}: {msg_category}/{msg_subcategory} unsubscribed")
                 continue
 
             text, image_url, keyboard, image_bytes = format_telegram_message(msg)
@@ -2098,22 +2146,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Handle back button
     if action.startswith("back:"):
         menu_to_go = action.split(":", 1)[1]
+        
         if menu_to_go == "main":
             # Show the same welcome content as /start
-            welcome_text = f"""
-👋 <b>Welcome to Hollowscan!</b>
-
-<i>Hello {username}!</i> Get instant product alerts with all the data you need.
-
-🎯 <b>Features:</b>
-• ⚡️ Real-time notifications
-• 🖼️ Product images
-• 🔗 Direct action links
-• 📊 Full stock & price data
-• ⏸️ Pause/Resume anytime
-
-📊 <b>Status:</b>
-"""
+            welcome_text = f"👋 <b>Welcome to Hollowscan!</b>\n\n<i>Hello {username}!</i> Get instant product alerts with all the data you need.\n\n🎯 <b>Features:</b>\n• ⚡️ Real-time notifications\n• 🖼️ Product images\n• 🔗 Direct action links\n• 📊 Full stock & price data\n• ⏸️ Pause/Resume anytime\n\n📊 <b>Status:</b>\n"
             if sm.is_active(user_id):
                 stats = sm.get_user_stats(user_id)
                 welcome_text += f"✅ <b>Active</b> – {stats['days_remaining']} days remaining\n"
@@ -2121,11 +2157,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     welcome_text += "⏸️ Alerts currently paused\n"
             else:
                 welcome_text += "❌ <b>Not subscribed</b>\n\nRedeem a code to get started!\n"
-
             welcome_text += '\n💡 <b>Tip:</b> Click on "⚙️ <b>Alert Settings</b>" below to toggle ✅ on or ❌ off any country store you want to receive (or stop receiving) notifications from. Customize your experience!'
-            
             await query.edit_message_text(welcome_text, parse_mode=ParseMode.HTML, reply_markup=create_main_menu())
-        return
+            return
+            
+        elif menu_to_go == "settings":
+            # Show main settings (category menu)
+            all_cats = cm.get_categories()
+            user_cats = sm.get_user_categories(user_id)
+            text = "⚙️ <b>Alert Category Settings</b>\n\nTap a category to manage its stores:"
+            buttons = []
+            for cat in all_cats:
+                is_enabled = cat in user_cats
+                status_icon = "✅" if is_enabled else "❌"
+                buttons.append([InlineKeyboardButton(f"{status_icon} {cat.replace('_', ' ')}", callback_data=f"settings_cat:{cat}")])
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=create_menu_with_back(buttons, "main"))
+            return
     
     if action == "status":
         if not sm.is_active(user_id):
@@ -2187,47 +2234,66 @@ Get a code from your administrator!
         all_cats = cm.get_categories()
         user_cats = sm.get_user_categories(user_id)
         
-        text = "⚙️ <b>Alert Category Settings</b>\n\nTap to toggle categories on/off:"
+        text = "⚙️ <b>Alert Category Settings</b>\n\nTap a category to manage its stores:"
         
         buttons = []
         for cat in all_cats:
             is_enabled = cat in user_cats
             status_icon = "✅" if is_enabled else "❌"
-            # Display with spaces, but keep underscores in callback_data if they exist
-            display_name = cat.replace("_", " ")
-            buttons.append([InlineKeyboardButton(f"{status_icon} {display_name}", callback_data=f"toggle_cat:{cat}")])
+            buttons.append([InlineKeyboardButton(f"{status_icon} {cat.replace('_', ' ')}", callback_data=f"settings_cat:{cat}")])
             
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=create_menu_with_back(buttons, "main"))
 
-    elif action.startswith("toggle_cat:"):
-        max_retries = 3
-        for i in range(max_retries):
-            try:
-                cat_to_toggle = action.split(":", 1)[1]
-                new_state = sm.toggle_category(user_id, cat_to_toggle)
-                
-                # Refresh the menu to show new state
-                all_cats = cm.get_categories()
-                user_cats = sm.get_user_categories(user_id)
-                
-                buttons = []
-                for cat in all_cats:
-                    is_enabled = cat in user_cats
-                    status_icon = "✅" if is_enabled else "❌"
-                    display_name = cat.replace("_", " ")
-                    buttons.append([InlineKeyboardButton(f"{status_icon} {display_name}", callback_data=f"toggle_cat:{cat}")])
-                
-                await query.edit_message_text(
-                    "⚙️ <b>Alert Category Settings</b>\n\nTap to toggle categories on/off:",
-                    parse_mode=ParseMode.HTML, 
-                    reply_markup=create_menu_with_back(buttons, "main")
-                )
-                break 
-            except Exception as e:
-                # If message is not modified (user clicked same filter twice fast), ignore
-                if "Message is not modified" in str(e):
-                    break
-                logger.error(f"Toggle error: {e}")
+    elif action.startswith("settings_cat:") or action.startswith("toggle_subcat:") or action.startswith("toggle_cat:"):
+        # Determine category and specific command
+        parts = action.split(":", 2)
+        cmd = parts[0]
+        cat = parts[1]
+        
+        if cmd == "toggle_subcat":
+            sub = parts[2]
+            sm.toggle_subcategory(user_id, cat, sub)
+        elif cmd == "toggle_cat":
+            sm.toggle_category(user_id, cat)
+
+        # Build / Refresh Subcategory Menu
+        all_subs = cm.get_subcategories(cat)
+        user_cats = sm.get_user_categories(user_id)
+        is_cat_enabled = cat in user_cats
+        disabled_subs = sm.get_disabled_subcategories(user_id)
+
+        status_text = "✅ ENABLED" if is_cat_enabled else "❌ DISABLED (Turn on to see stores)"
+        text = f"⚙️ <b>Store Settings: {cat.replace('_', ' ')}</b>\n\nCategory Status: <b>{status_text}</b>"
+        
+        buttons = []
+        # Master Toggle
+        toggle_label = "🔴 Disable Category" if is_cat_enabled else "🟢 Enable Category"
+        buttons.append([InlineKeyboardButton(toggle_label, callback_data=f"toggle_cat:{cat}")])
+        buttons.append([InlineKeyboardButton("━━━━━━━━━━━━━━━", callback_data="none")])
+        
+        row = []
+        for sub in all_subs:
+            sub_key = f"{cat}:{sub}"
+            is_sub_enabled = (sub_key not in disabled_subs)
+            sub_icon = "✅" if is_sub_enabled else "❌"
+            
+            # Safety: Telegram callback_data limit is 64 bytes
+            sub_callback = f"toggle_subcat:{cat}:{sub}"
+            if len(sub_callback.encode('utf-8')) > 64:
+                # Truncate sub name if needed (unlikely but safe)
+                sub_callback = f"toggle_subcat:{cat}:{sub[:20]}"
+            
+            row.append(InlineKeyboardButton(f"{sub_icon} {sub}", callback_data=sub_callback))
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
+        if row: buttons.append(row)
+
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=create_menu_with_back(buttons, "settings"))
+
+    elif action == "none":
+        # Decorative separator, ignore click
+        pass
                 
     elif action == "help":
         text = """
@@ -2351,8 +2417,8 @@ async def add_channel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     url = context.args[0]
-    category = context.args[1].replace("_", " ") # Allow underscores for spaces in cat
-    name = " ".join(context.args[2:])
+    category = context.args[1].replace("_", " ")[:20] 
+    name = " ".join(context.args[2:])[:20]
 
     if cm.add_channel(url, category, name):
         await update.message.reply_text(
@@ -2656,14 +2722,14 @@ async def _broadcast_job_inner(context: ContextTypes.DEFAULT_TYPE):
         sent_count = 0
         failed_count = 0
         
-        # Determine Message Category
+        # Determine Category & Subcategory
         msg_channel_id = str(msg.get("channel_id"))
-        # We need to find the category for this channel ID
-        # Since we only have the ID here, we search the CM
-        msg_category = "Uncategorized" 
+        msg_category = "Uncategorized"
+        msg_subcategory = "Unknown"
         for c in cm.channels:
             if c['id'] == msg_channel_id:
                 msg_category = c.get('category', 'Uncategorized')
+                msg_subcategory = c.get('name', 'Unknown')
                 break
         
         # Send to all active users with rate limiting
@@ -2671,9 +2737,8 @@ async def _broadcast_job_inner(context: ContextTypes.DEFAULT_TYPE):
         failed_count = 0
         
         for uid in active_users:
-            # CHECK CATEGORY SUBSCRIPTION
-            user_cats = sm.get_user_categories(uid)
-            if msg_category not in user_cats:
+            # CHECK SUBSCRIPTION
+            if not sm.is_subscribed(uid, msg_category, msg_subcategory):
                 continue
 
             try:
@@ -3272,6 +3337,42 @@ Use the menu buttons for more options!
     elif update.callback_query:
         await update.callback_query.message.reply_text(menu_text, parse_mode=ParseMode.HTML)
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log the error and send a message to notify the developer/admin"""
+    # 1. Log the error
+    logger.error("Exception while handling an update:", exc_info=context.error)
+    
+    # 2. Extract Traceback for Admin
+    tb_list = traceback.format_exception(None, context.error, context.error.__traceback__)
+    tb_string = "".join(tb_list)
+
+    # 3. Notify User
+    if isinstance(update, Update):
+        # Stop loading spinner if it's a callback query
+        if update.callback_query:
+            try:
+                await update.callback_query.answer("❌ An error occurred.")
+            except: pass
+
+        if update.effective_message:
+            text = "❌ <b>An internal error occurred.</b>\nOur team has been notified. Please try again later."
+            try:
+                await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+            except: pass
+
+    # 4. Notify Admins
+    if ADMIN_USER_IDS:
+        admin_text = f"🚨 <b>ERROR ALERT</b>\n\n"
+        admin_text += f"👤 User: {update.effective_user.id if update and update.effective_user else 'None'}\n"
+        admin_text += f"💬 Message: <code>{update.effective_message.text if update and update.effective_message else 'None'}</code>\n\n"
+        admin_text += f"📦 <b>Traceback:</b>\n<code>{tb_string[-3000:]}</code>" # Send last 3k chars to stay under limit
+        
+        for admin_id in ADMIN_USER_IDS:
+            try:
+                await context.bot.send_message(chat_id=int(admin_id), text=admin_text, parse_mode=ParseMode.HTML)
+            except Exception as e:
+                logger.error(f"Failed to notify admin {admin_id}: {e}")
+
 # 5. RUN BOT FUNCTION
 def run_bot():
     """Run bot with professional alert system"""
@@ -3329,6 +3430,9 @@ def run_bot():
         app.add_handler(CommandHandler("help", show_help))  # Help command
         app.add_handler(CallbackQueryHandler(button_handler))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        
+        # Global error handler
+        app.add_error_handler(error_handler)
         
         if app.job_queue:
             logger.info("   Adding broadcast job with overlap protection...")
