@@ -2274,7 +2274,7 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [InlineKeyboardButton("📅 Monthly Plan - £4.99/mo", callback_data="sub_choice:monthly")],
-        [InlineKeyboardButton("🗓️ Yearly Plan - £140.00/yr", callback_data="sub_choice:yearly")],
+        [InlineKeyboardButton("🗓️ Yearly Plan - £55.50/yr", callback_data="sub_choice:yearly")],
         [InlineKeyboardButton("◀️ Back", callback_data="back:main")]
     ]
     
