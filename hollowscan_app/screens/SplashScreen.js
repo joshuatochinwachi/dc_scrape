@@ -1,173 +1,220 @@
 import React, { useEffect, useRef } from 'react';
-import { StyleSheet, View, Text, Image, Animated } from 'react-native';
+import { StyleSheet, View, Text, Image, Animated, Dimensions, Easing } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import Constants from '../Constants';
 
+const { width } = Dimensions.get('window');
+
 const SplashScreen = ({ onComplete }) => {
     const brand = Constants.BRAND;
-    
+
     // Animation refs
-    const scaleAnim = useRef(new Animated.Value(0.3)).current;
-    const opacityAnim = useRef(new Animated.Value(0)).current;
-    const slideAnim = useRef(new Animated.Value(30)).current;
+    const logoScale = useRef(new Animated.Value(0.8)).current;
+    const logoOpacity = useRef(new Animated.Value(0)).current;
+    const textTranslateY = useRef(new Animated.Value(40)).current;
+    const textOpacity = useRef(new Animated.Value(0)).current;
+    const pulseAnim = useRef(new Animated.Value(1)).current;
 
     useEffect(() => {
-        // Logo scale animation
+        // 1. Entrance Animation
         Animated.sequence([
+            // Logo POP
             Animated.parallel([
-                Animated.timing(scaleAnim, {
+                Animated.spring(logoScale, {
                     toValue: 1,
-                    duration: 600,
+                    friction: 6,
+                    tension: 40,
                     useNativeDriver: true,
                 }),
-                Animated.timing(opacityAnim, {
+                Animated.timing(logoOpacity, {
                     toValue: 1,
-                    duration: 600,
+                    duration: 800,
                     useNativeDriver: true,
                 }),
             ]),
-            // Text slide up animation
-            Animated.timing(slideAnim, {
-                toValue: 0,
-                duration: 500,
-                useNativeDriver: true,
-            }),
+            // Text Slide Up
+            Animated.parallel([
+                Animated.timing(textTranslateY, {
+                    toValue: 0,
+                    duration: 800,
+                    easing: Easing.out(Easing.back(1.5)),
+                    useNativeDriver: true,
+                }),
+                Animated.timing(textOpacity, {
+                    toValue: 1,
+                    duration: 800,
+                    useNativeDriver: true,
+                }),
+            ]),
         ]).start(() => {
-            // Wait a bit then call onComplete
-            setTimeout(onComplete, 800);
+            // 2. Continuous Pulse (Heartbeat)
+            Animated.loop(
+                Animated.sequence([
+                    Animated.timing(pulseAnim, {
+                        toValue: 1.05,
+                        duration: 1000,
+                        easing: Easing.inOut(Easing.ease),
+                        useNativeDriver: true,
+                    }),
+                    Animated.timing(pulseAnim, {
+                        toValue: 1,
+                        duration: 1000,
+                        easing: Easing.inOut(Easing.ease),
+                        useNativeDriver: true,
+                    }),
+                ])
+            ).start();
+
+            // 3. Exit delay
+            setTimeout(onComplete, 2500);
         });
-    }, [scaleAnim, opacityAnim, slideAnim, onComplete]);
+    }, []);
 
     return (
-        <LinearGradient
-            colors={[brand.DARK_BG, brand.BLUE + '20']}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.container}
-        >
-            <SafeAreaView style={styles.safeArea}>
-                {/* LOGO WITH BOUNCE ANIMATION */}
-                <Animated.View
-                    style={[
-                        styles.logoContainer,
-                        {
-                            transform: [
-                                { scale: scaleAnim },
-                                {
-                                    translateY: slideAnim.interpolate({
-                                        inputRange: [0, 30],
-                                        outputRange: [0, 30],
-                                    }),
-                                },
-                            ],
-                            opacity: opacityAnim,
-                        },
-                    ]}
-                >
-                    <LinearGradient
-                        colors={[brand.BLUE, brand.PURPLE]}
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 1, y: 1 }}
-                        style={styles.logoBg}
-                    >
-                        <Text style={styles.logoIcon}>⌖</Text>
-                    </LinearGradient>
+        <View style={styles.container}>
+            {/* Deep Dark Background */}
+            <LinearGradient
+                colors={['#0F1014', '#050508', '#000000']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={StyleSheet.absoluteFill}
+            />
+
+            {/* Subtle Gradient Glow effect behind logo */}
+            <Image
+                source={require('../assets/welcome-hero.png')}
+                style={styles.backgroundImage}
+                blurRadius={60}
+            />
+
+            <SafeAreaView style={styles.contentContainer}>
+
+                {/* HERO IMAGE */}
+                <Animated.View style={{
+                    opacity: logoOpacity,
+                    transform: [{ scale: logoScale }]
+                }}>
+                    <View style={styles.heroCard}>
+                        <Image
+                            source={require('../assets/welcome-hero.png')}
+                            style={styles.heroImage}
+                            resizeMode="contain"
+                        />
+                        {/* Glossy Overlay for 'Card' look */}
+                        <LinearGradient
+                            colors={['rgba(255,255,255,0.1)', 'transparent', 'transparent']}
+                            style={styles.glossOverlay}
+                        />
+                    </View>
                 </Animated.View>
 
-                {/* TEXT SECTION */}
-                <Animated.View
-                    style={[
-                        styles.textContainer,
-                        {
-                            opacity: opacityAnim,
-                            transform: [
-                                {
-                                    translateY: slideAnim,
-                                },
-                            ],
-                        },
-                    ]}
-                >
-                    <Text style={styles.title}>Hollowscan</Text>
-                    <Text style={styles.subtitle}>Deal Hunter</Text>
-                    <Text style={styles.description}>Finding profit opportunities</Text>
+                {/* TEXT CONTENT */}
+                <Animated.View style={[styles.textWrapper, {
+                    opacity: textOpacity,
+                    transform: [{ translateY: textTranslateY }]
+                }]}>
+                    <Text style={styles.appName}>HOLLOWSCAN</Text>
+
+                    <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
+                        <LinearGradient
+                            colors={[brand.BLUE, brand.PURPLE]}
+                            start={{ x: 0, y: 0 }}
+                            end={{ x: 1, y: 0 }}
+                            style={styles.taglineBadge}
+                        >
+                            <Text style={styles.taglineText}>ADVANCED DEAL HUNTER</Text>
+                        </LinearGradient>
+                    </Animated.View>
+
+                    <Text style={styles.footerText}>Automated Arbitrage Intelligence</Text>
                 </Animated.View>
 
-                {/* LOADING INDICATOR */}
-                <View style={styles.loaderContainer}>
-                    <View style={[styles.loaderDot, { backgroundColor: brand.BLUE }]} />
-                    <View style={[styles.loaderDot, { backgroundColor: brand.PURPLE, marginHorizontal: 8 }]} />
-                    <View style={[styles.loaderDot, { backgroundColor: brand.BLUE }]} />
-                </View>
             </SafeAreaView>
-        </LinearGradient>
+        </View>
     );
 };
 
 const styles = StyleSheet.create({
     container: {
         flex: 1,
+        backgroundColor: '#050508',
     },
-    safeArea: {
+    backgroundImage: {
+        position: 'absolute',
+        width: width * 1.5,
+        height: width * 1.5,
+        top: -width * 0.2,
+        opacity: 0.15,
+        transform: [{ rotate: '45deg' }]
+    },
+    contentContainer: {
         flex: 1,
         justifyContent: 'center',
         alignItems: 'center',
+        zIndex: 2,
     },
-    logoContainer: {
-        marginBottom: 40,
-    },
-    logoBg: {
-        width: 100,
-        height: 100,
-        borderRadius: 28,
-        justifyContent: 'center',
-        alignItems: 'center',
+    // Hero Card Professional Look
+    heroCard: {
+        width: width * 0.85,  // Much larger width
+        height: width * 0.85, // Square aspect ratio
+        borderRadius: 30,
+        backgroundColor: '#0A0A0B',
         shadowColor: '#2D82FF',
-        shadowOffset: { width: 0, height: 12 },
-        shadowOpacity: 0.4,
-        shadowRadius: 20,
-        elevation: 10,
-    },
-    logoIcon: {
-        fontSize: 50,
-        color: '#FFF',
-    },
-    textContainer: {
-        alignItems: 'center',
-        marginBottom: 60,
-    },
-    title: {
-        fontSize: 36,
-        fontWeight: '900',
-        color: '#FFF',
-        marginBottom: 4,
-        letterSpacing: -0.5,
-    },
-    subtitle: {
-        fontSize: 16,
-        fontWeight: '700',
-        color: '#9B4DFF',
-        marginBottom: 12,
-        letterSpacing: 0.5,
-    },
-    description: {
-        fontSize: 13,
-        fontWeight: '600',
-        color: 'rgba(255, 255, 255, 0.6)',
-        letterSpacing: 0.3,
-    },
-    loaderContainer: {
-        position: 'absolute',
-        bottom: 60,
-        flexDirection: 'row',
+        shadowOffset: { width: 0, height: 20 },
+        shadowOpacity: 0.6, // Strong glow
+        shadowRadius: 40,
+        elevation: 25, // Android glow
         justifyContent: 'center',
         alignItems: 'center',
+        borderWidth: 1,
+        borderColor: 'rgba(45, 130, 255, 0.2)',
+        overflow: 'hidden',
+        marginBottom: 50,
     },
-    loaderDot: {
-        width: 10,
-        height: 10,
-        borderRadius: 5,
+    heroImage: {
+        width: '100%',
+        height: '100%',
+    },
+    glossOverlay: {
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        right: 0,
+        height: '40%',
+    },
+    // Typography
+    textWrapper: {
+        alignItems: 'center',
+    },
+    appName: {
+        fontSize: 32,
+        fontWeight: '900',
+        color: '#FFFFFF',
+        letterSpacing: 4, // Premium tracking
+        marginBottom: 16,
+        textShadowColor: 'rgba(45, 130, 255, 0.5)',
+        textShadowOffset: { width: 0, height: 0 },
+        textShadowRadius: 20,
+    },
+    taglineBadge: {
+        paddingHorizontal: 16,
+        paddingVertical: 6,
+        borderRadius: 20,
+        marginBottom: 20,
+    },
+    taglineText: {
+        color: '#FFF',
+        fontSize: 12,
+        fontWeight: '800',
+        letterSpacing: 1.5,
+    },
+    footerText: {
+        color: 'rgba(255, 255, 255, 0.4)',
+        fontSize: 11,
+        letterSpacing: 1,
+        marginTop: 20,
+        textTransform: 'uppercase',
     },
 });
 

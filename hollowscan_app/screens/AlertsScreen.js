@@ -1,18 +1,34 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useContext } from 'react';
 import { StyleSheet, View, Text, Switch, ScrollView, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Constants from '../Constants';
+import { UserContext } from '../context/UserContext';
 
 const AlertsScreen = () => {
+    const { isDarkMode } = useContext(UserContext);
     const brand = Constants.BRAND;
+    const colors = isDarkMode ? {
+        bg: brand.DARK_BG,
+        card: '#161618',
+        text: '#FFFFFF',
+        textSecondary: '#8E8E93',
+        border: 'rgba(255,255,255,0.08)',
+        accent: brand.BLUE
+    } : {
+        bg: '#F8F9FE',
+        card: '#FFFFFF',
+        text: '#1C1C1E',
+        textSecondary: '#636366',
+        border: 'rgba(0,0,0,0.05)',
+        accent: brand.BLUE
+    };
 
     // State
-    const [isEnabled, setIsEnabled] = useState(true);
     const [categories, setCategories] = useState({ 'USA Stores': [], 'UK Stores': [], 'Canada Stores': [] });
     const [loading, setLoading] = useState(true);
+    const [activeRegion, setActiveRegion] = useState('USA Stores');
 
-    // Preferences State (Mocked per session for now)
-    const [selectedCountries, setSelectedCountries] = useState({ 'USA Stores': true, 'UK Stores': false, 'Canada Stores': false });
+    // Preferences State
     const [selectedSubs, setSelectedSubs] = useState({});
 
     useEffect(() => {
@@ -26,13 +42,11 @@ const AlertsScreen = () => {
             const cats = data.categories || {};
             setCategories(cats);
 
-            // Initialize all subs as enabled for selected countries
+            // Initialize all subs as enabled (MOCK: usually would fetch user's real prefs)
             const initialSubs = {};
             Object.keys(cats).forEach(country => {
                 cats[country].forEach(sub => {
-                    if (sub !== 'ALL') {
-                        initialSubs[sub] = true;
-                    }
+                    if (sub !== 'ALL') initialSubs[sub] = true;
                 });
             });
             setSelectedSubs(initialSubs);
@@ -43,90 +57,107 @@ const AlertsScreen = () => {
         }
     };
 
-    const toggleCountry = (code) => {
-        setSelectedCountries(prev => ({ ...prev, [code]: !prev[code] }));
-    };
-
     const toggleSub = (sub) => {
         setSelectedSubs(prev => ({ ...prev, [sub]: !prev[sub] }));
     };
 
-    const renderSubcategorySection = (countryCode, label, flag) => {
-        if (!selectedCountries[countryCode]) return null;
-
-        return (
-            <View style={styles.section}>
-                <Text style={styles.sectionTitle}>{flag} {label} Stores</Text>
-                {categories[countryCode]?.map(sub => (
-                    <View key={sub} style={styles.row}>
-                        <Text style={styles.label}>{sub}</Text>
-                        <Switch
-                            trackColor={{ false: '#767577', true: brand.BLUE }}
-                            thumbColor={selectedSubs[sub] ? '#FFF' : '#f4f3f4'}
-                            onValueChange={() => toggleSub(sub)}
-                            value={selectedSubs[sub]}
-                        />
-                    </View>
-                ))}
-            </View>
-        );
+    const toggleAllInRegion = (region, value) => {
+        const newSubs = { ...selectedSubs };
+        categories[region]?.forEach(sub => {
+            if (sub !== 'ALL') newSubs[sub] = value;
+        });
+        setSelectedSubs(newSubs);
     };
 
+    const getStoreEmoji = (name) => {
+        const n = name.toLowerCase();
+        if (n.includes('amazon')) return '📦';
+        if (n.includes('walmart')) return '🔵';
+        if (n.includes('argos')) return '🔴';
+        if (n.includes('pokemon')) return '⚡';
+        if (n.includes('hobby')) return '🎮';
+        if (n.includes('target')) return '🎯';
+        if (n.includes('currys')) return '🔌';
+        return '🏪';
+    };
+
+    const StoreCard = ({ name }) => (
+        <TouchableOpacity
+            style={[styles.storeCard, { backgroundColor: colors.card, borderColor: colors.border }]}
+            onPress={() => toggleSub(name)}
+            activeOpacity={0.7}
+        >
+            <View style={styles.storeLogoContainer}>
+                <Text style={styles.storeEmoji}>{getStoreEmoji(name)}</Text>
+            </View>
+            <View style={styles.storeInfo}>
+                <Text style={[styles.storeName, { color: colors.text }]}>{name}</Text>
+                <View style={styles.statusRow}>
+                    <View style={[styles.statusDot, { backgroundColor: selectedSubs[name] ? '#10B981' : '#FF3B30' }]} />
+                    <Text style={[styles.statusText, { color: colors.textSecondary }]}>
+                        {selectedSubs[name] ? 'Alerts Active' : 'Paused'}
+                    </Text>
+                </View>
+            </View>
+            <Switch
+                trackColor={{ false: '#767577', true: brand.BLUE }}
+                thumbColor={'#FFF'}
+                onValueChange={() => toggleSub(name)}
+                value={selectedSubs[name] || false}
+            />
+        </TouchableOpacity>
+    );
+
     return (
-        <SafeAreaView style={styles.container} edges={['top']}>
-            <View style={styles.header}>
-                <Text style={styles.headerTitle}>Alert Settings</Text>
+        <SafeAreaView style={[styles.container, { backgroundColor: colors.bg }]} edges={['top']}>
+            <View style={[styles.header, { borderBottomColor: colors.border, backgroundColor: colors.card }]}>
+                <Text style={[styles.headerTitle, { color: colors.text }]}>Dashboard</Text>
                 <TouchableOpacity style={styles.saveBtn}>
-                    <Text style={{ color: brand.BLUE, fontWeight: '700' }}>Save</Text>
+                    <Text style={{ color: brand.BLUE, fontWeight: '700', fontSize: 16 }}>Save Changes</Text>
                 </TouchableOpacity>
             </View>
 
-            <ScrollView contentContainerStyle={styles.scroll}>
-                {/* MASTER TOGGLE */}
-                <View style={styles.masterRow}>
-                    <Text style={styles.masterLabel}>Push Notifications</Text>
-                    <Switch
-                        trackColor={{ false: '#767577', true: '#10B981' }}
-                        thumbColor={'#FFF'}
-                        onValueChange={setIsEnabled}
-                        value={isEnabled}
-                    />
+            <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+                {/* REGION TABS */}
+                <View style={[styles.tabsContainer, { backgroundColor: isDarkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }]}>
+                    {['USA Stores', 'UK Stores', 'Canada Stores'].map(region => (
+                        <TouchableOpacity
+                            key={region}
+                            style={[
+                                styles.tab,
+                                activeRegion === region && { backgroundColor: brand.BLUE, borderColor: brand.BLUE }
+                            ]}
+                            onPress={() => setActiveRegion(region)}
+                        >
+                            <Text style={[
+                                styles.tabText,
+                                activeRegion === region && { color: '#FFF' }
+                            ]}>
+                                {region === 'USA Stores' ? '🇺🇸 US' : region === 'UK Stores' ? '🇬🇧 UK' : '🇨🇦 CA'}
+                            </Text>
+                        </TouchableOpacity>
+                    ))}
                 </View>
 
-                {isEnabled && (
-                    <>
-                        <Text style={styles.description}>
-                            Select which regions and stores you want to receive alerts for.
-                        </Text>
+                {/* BULK ACTIONS */}
+                <View style={styles.bulkRow}>
+                    <Text style={[styles.regionTitle, { color: colors.textSecondary }]}>
+                        {activeRegion.toUpperCase()} MANAGEMENT
+                    </Text>
+                    <TouchableOpacity onPress={() => toggleAllInRegion(activeRegion, true)}>
+                        <Text style={{ color: brand.BLUE, fontWeight: '700', fontSize: 13 }}>Enable All</Text>
+                    </TouchableOpacity>
+                </View>
 
-                        {/* COUNTRY FILTERS */}
-                        <View style={styles.section}>
-                            <Text style={styles.sectionTitle}>Regions</Text>
-                            <View style={styles.row}>
-                                <Text style={styles.label}>🇺🇸 United States</Text>
-                                <Switch value={selectedCountries['USA Stores']} onValueChange={() => toggleCountry('USA Stores')} trackColor={{ true: brand.BLUE }} />
-                            </View>
-                            <View style={styles.row}>
-                                <Text style={styles.label}>🇬🇧 United Kingdom</Text>
-                                <Switch value={selectedCountries['UK Stores']} onValueChange={() => toggleCountry('UK Stores')} trackColor={{ true: brand.BLUE }} />
-                            </View>
-                            <View style={styles.row}>
-                                <Text style={styles.label}>🇨🇦 Canada</Text>
-                                <Switch value={selectedCountries['Canada Stores']} onValueChange={() => toggleCountry('Canada Stores')} trackColor={{ true: brand.BLUE }} />
-                            </View>
-                        </View>
-
-                        {/* SUBCATEGORY FILTERS */}
-                        {loading ? (
-                            <ActivityIndicator color={brand.BLUE} style={{ marginTop: 20 }} />
-                        ) : (
-                            <>
-                                {renderSubcategorySection('USA Stores', 'United States', '🇺🇸')}
-                                {renderSubcategorySection('UK Stores', 'United Kingdom', '🇬🇧')}
-                                {renderSubcategorySection('Canada Stores', 'Canada', '🇨🇦')}
-                            </>
-                        )}
-                    </>
+                {/* STORE CARDS GRID */}
+                {loading ? (
+                    <ActivityIndicator color={brand.BLUE} style={{ marginTop: 40 }} />
+                ) : (
+                    <View style={styles.storeGrid}>
+                        {categories[activeRegion]?.map(sub => (
+                            sub !== 'ALL' && <StoreCard key={sub} name={sub} />
+                        ))}
+                    </View>
                 )}
             </ScrollView>
         </SafeAreaView>
@@ -134,23 +165,73 @@ const AlertsScreen = () => {
 };
 
 const styles = StyleSheet.create({
-    container: { flex: 1, backgroundColor: '#FAF9F6' },
-    header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 20, borderBottomWidth: 1, borderBottomColor: '#E5E7EB', backgroundColor: '#FFF' },
-    headerTitle: { fontSize: 24, fontWeight: '800', color: '#1F2937' },
-    saveBtn: { padding: 10 },
+    container: { flex: 1 },
+    header: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        paddingHorizontal: 20,
+        paddingVertical: 15,
+        borderBottomWidth: 1,
+    },
+    headerTitle: { fontSize: 28, fontWeight: '900', letterSpacing: -0.5 },
+    saveBtn: { paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8 },
 
-    scroll: { padding: 20 },
+    scroll: { padding: 20, paddingBottom: 100 },
 
-    masterRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#FFF', padding: 20, borderRadius: 16, marginBottom: 15, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 5 },
-    masterLabel: { fontSize: 18, fontWeight: '700', color: '#1F2937' },
+    tabsContainer: {
+        flexDirection: 'row',
+        backgroundColor: 'rgba(0,0,0,0.05)',
+        borderRadius: 14,
+        padding: 5,
+        marginBottom: 25
+    },
+    tab: {
+        flex: 1,
+        paddingVertical: 10,
+        alignItems: 'center',
+        borderRadius: 10,
+        borderWidth: 1,
+        borderColor: 'transparent'
+    },
+    tabText: { fontSize: 14, fontWeight: '700', color: '#9CA3AF' },
 
-    description: { color: '#6B7280', marginBottom: 25, lineHeight: 20 },
+    bulkRow: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        marginBottom: 15,
+        paddingHorizontal: 4
+    },
+    regionTitle: { fontSize: 11, fontWeight: '800', letterSpacing: 1.5 },
 
-    section: { marginBottom: 30 },
-    sectionTitle: { fontSize: 14, fontWeight: '800', color: '#9CA3AF', marginBottom: 15, letterSpacing: 1, textTransform: 'uppercase' },
-
-    row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#F3F4F6' },
-    label: { fontSize: 16, fontWeight: '600', color: '#374151' }
+    storeGrid: { gap: 12 },
+    storeCard: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        padding: 14,
+        borderRadius: 18,
+        borderWidth: 1,
+        shadowColor: '#000',
+        shadowOpacity: 0.03,
+        shadowRadius: 10,
+        shadowOffset: { width: 0, height: 4 }
+    },
+    storeLogoContainer: {
+        width: 48,
+        height: 48,
+        borderRadius: 14,
+        backgroundColor: '#F8F9FE',
+        justifyContent: 'center',
+        alignItems: 'center',
+        marginRight: 15
+    },
+    storeEmoji: { fontSize: 24 },
+    storeInfo: { flex: 1 },
+    storeName: { fontSize: 16, fontWeight: '700', marginBottom: 4 },
+    statusRow: { flexDirection: 'row', alignItems: 'center' },
+    statusDot: { width: 6, height: 6, borderRadius: 3, marginRight: 6 },
+    statusText: { fontSize: 12, fontWeight: '600' }
 });
 
 export default AlertsScreen;

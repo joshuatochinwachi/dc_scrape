@@ -1,5 +1,5 @@
 import React, { useContext, useState, useEffect } from 'react';
-import { StyleSheet, View, Text, ScrollView, TouchableOpacity, Image, Switch, Modal, TextInput, ActivityIndicator, Linking, Alert, Clipboard } from 'react-native';
+import { StyleSheet, View, Text, ScrollView, TouchableOpacity, Image, Switch, Modal, TextInput, ActivityIndicator, Linking, Alert, Clipboard, ImageBackground } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -10,12 +10,27 @@ import { registerForPushNotifications, requestNotificationPermissions } from '..
 
 const ProfileScreen = () => {
     const { savedProducts } = useContext(SavedContext);
-    const { user } = useContext(UserContext);
+    const { user, isDarkMode, toggleTheme, logout } = useContext(UserContext);
     const brand = Constants.BRAND;
 
+    const colors = isDarkMode ? {
+        bg: brand.DARK_BG,
+        card: '#161618',
+        text: '#FFFFFF',
+        textSecondary: '#8E8E93',
+        border: 'rgba(255,255,255,0.08)',
+        groupBg: '#1C1C1E'
+    } : {
+        bg: '#F8F9FE',
+        card: '#FFFFFF',
+        text: '#1C1C1E',
+        textSecondary: '#636366',
+        border: 'rgba(0,0,0,0.05)',
+        groupBg: '#FFFFFF'
+    };
+
     // State Management
-    const [notificationsEnabled, setNotificationsEnabled] = useState(true);
-    const [darkMode, setDarkMode] = useState(false);
+    const [notificationsEnabled, setNotificationsEnabled] = useState(false);
     const [country, setCountry] = useState('US');
     const [telegramLinked, setTelegramLinked] = useState(false);
     const [telegramModalVisible, setTelegramModalVisible] = useState(false);
@@ -30,8 +45,12 @@ const ProfileScreen = () => {
     // Calculate generic stats
     const savedCount = savedProducts.length;
     const potentialProfit = savedProducts.reduce((acc, p) => {
-        const buy = parseFloat(p.product_data?.price || 0);
-        const sell = parseFloat(p.product_data?.resell || 0);
+        const buy = parseFloat(String(p.product_data?.price || '0').replace(/[^0-9.]/g, ''));
+        const sell = parseFloat(String(p.product_data?.resell || '0').replace(/[^0-9.]/g, ''));
+
+        // Only calculate profit if there's a valid sell price
+        if (isNaN(sell) || sell <= 0) return acc;
+
         const fees = sell * 0.15;
         const profit = sell - buy - fees;
         return acc + (profit > 0 ? profit : 0);
@@ -47,7 +66,7 @@ const ProfileScreen = () => {
         setIsGeneratingKey(true);
         try {
             console.log('[TELEGRAM] Generating link key for user:', userId);
-            
+
             const response = await fetch(
                 `${Constants.API_BASE_URL}/v1/user/telegram/generate-key?user_id=${userId}`,
                 { method: 'POST', headers: { 'Content-Type': 'application/json' } }
@@ -73,7 +92,7 @@ const ProfileScreen = () => {
         setIsCheckingStatus(true);
         try {
             console.log('[TELEGRAM] Checking link status...');
-            
+
             const response = await fetch(
                 `${Constants.API_BASE_URL}/v1/user/telegram/link-status?user_id=${userId}`,
                 { method: 'GET', headers: { 'Content-Type': 'application/json' } }
@@ -120,6 +139,23 @@ const ProfileScreen = () => {
         });
     };
 
+    const handleSignOut = () => {
+        Alert.alert(
+            'Sign Out',
+            'Are you sure you want to sign out?',
+            [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                    text: 'Sign Out',
+                    style: 'destructive',
+                    onPress: async () => {
+                        await logout();
+                    }
+                }
+            ]
+        );
+    };
+
     const handleNotificationsToggle = async (value) => {
         if (value) {
             // Enable notifications - request permissions
@@ -143,67 +179,84 @@ const ProfileScreen = () => {
         }
     };
     const StatBox = ({ label, value }) => (
-        <View style={styles.statBox}>
-            <Text style={styles.statValue}>{value}</Text>
-            <Text style={styles.statLabel}>{label}</Text>
+        <View style={[styles.statBox, { backgroundColor: colors.card, borderBottomColor: colors.border }]}>
+            <Text style={[styles.statValue, { color: colors.text }]}>{value}</Text>
+            <Text style={[styles.statLabel, { color: colors.textSecondary }]}>{label}</Text>
         </View>
     );
 
     const SettingRowWithSwitch = ({ icon, label, value, onValueChange }) => (
-        <View style={styles.settingRow}>
+        <View style={[styles.settingRow, { borderBottomColor: colors.border }]}>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                <Text style={{ marginRight: 15, fontSize: 18, width: 25, textAlign: 'center' }}>{icon}</Text>
-                <Text style={styles.settingLabel}>{label}</Text>
+                <Text style={{ marginRight: 15, fontSize: 18, width: 25, textAlign: 'center', color: colors.text }}>{icon}</Text>
+                <Text style={[styles.settingLabel, { color: colors.text }]}>{label}</Text>
             </View>
             <Switch
                 value={value}
                 onValueChange={onValueChange}
-                trackColor={{ false: '#D1D5DB', true: '#FF8A65' }}
-                thumbColor={value ? '#FF6B35' : '#F3F4F6'}
+                trackColor={{ false: '#D1D5DB', true: brand.BLUE }}
+                thumbColor={'#FFF'}
             />
         </View>
     );
 
     const SettingRow = ({ icon, label, value, onPress, isDestructive, status }) => (
-        <TouchableOpacity style={styles.settingRow} onPress={onPress} disabled={!onPress}>
+        <TouchableOpacity
+            style={[styles.settingRow, { borderBottomColor: colors.border }]}
+            onPress={onPress}
+            disabled={!onPress}
+        >
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                <Text style={{ marginRight: 15, fontSize: 18, width: 25, textAlign: 'center' }}>{icon}</Text>
+                <Text style={{ marginRight: 15, fontSize: 18, width: 25, textAlign: 'center', color: colors.text }}>{icon}</Text>
                 <View>
-                    <Text style={[styles.settingLabel, isDestructive && { color: '#EF4444' }]}>{label}</Text>
-                    {status && <Text style={styles.statusText}>{status}</Text>}
+                    <Text style={[styles.settingLabel, { color: isDestructive ? '#EF4444' : colors.text }]}>{label}</Text>
+                    {status && <Text style={[styles.statusText, { color: colors.textSecondary }]}>{status}</Text>}
                 </View>
             </View>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                {value && <Text style={[styles.settingValue, isDestructive && { color: '#EF4444' }]}>{value}</Text>}
-                {onPress && <Text style={{ color: '#D1D5DB', fontSize: 16, marginLeft: 10 }}>›</Text>}
+                {value && <Text style={[styles.settingValue, { color: colors.textSecondary }]}>{value}</Text>}
+                {onPress && <Text style={{ color: colors.textSecondary, fontSize: 16, marginLeft: 10 }}>›</Text>}
             </View>
         </TouchableOpacity>
     );
 
     const SectionHeader = ({ title }) => (
         <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>{title}</Text>
+            <Text style={[styles.sectionTitle, { color: colors.textSecondary }]}>{title}</Text>
         </View>
     );
 
     return (
-        <SafeAreaView style={styles.container} edges={['top']}>
+        <SafeAreaView style={[styles.container, { backgroundColor: colors.bg }]} edges={['top']}>
             <ScrollView contentContainerStyle={styles.scroll}>
-                {/* PROFILE HEADER */}
-                <LinearGradient colors={['#FF8A65', '#FF6B35']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.profileHeader}>
+                {/* PROFILE HEADER - SLEEK COVER IMAGE */}
+                <ImageBackground
+                    source={require('../assets/profile_cover.png')}
+                    style={styles.profileHeader}
+                    resizeMode="cover"
+                >
+                    <LinearGradient
+                        colors={['rgba(0,0,0,0.1)', 'rgba(0,0,0,0.6)']}
+                        style={StyleSheet.absoluteFill}
+                    />
                     <View style={styles.avatarContainer}>
                         <Text style={styles.avatarText}>H</Text>
                     </View>
-                    <Text style={styles.userName}>HollowScan User</Text>
+                    <Text style={styles.userName}>{user?.email || 'HollowScan User'}</Text>
                     <View style={styles.planBadge}>
-                        <Text style={styles.planText}>👑 Free Plan</Text>
+                        <Text style={styles.planText}>👑 {user?.isPremium ? 'Premium' : 'Free'} Plan</Text>
                     </View>
                     <TouchableOpacity style={styles.upgradeBtn}>
-                        <LinearGradient colors={['#FF6B35', '#FF5722']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.upgradeGradient}>
+                        <LinearGradient
+                            colors={[brand.CYAN, brand.BLUE]}
+                            start={{ x: 0, y: 0 }}
+                            end={{ x: 1, y: 1 }}
+                            style={styles.upgradeGradient}
+                        >
                             <Text style={styles.upgradeText}>Upgrade to Premium</Text>
                         </LinearGradient>
                     </TouchableOpacity>
-                </LinearGradient>
+                </ImageBackground>
 
                 {/* STATS ROW */}
                 <View style={styles.statsRow}>
@@ -214,7 +267,7 @@ const ProfileScreen = () => {
 
                 {/* NOTIFICATION & PREFERENCES */}
                 <SectionHeader title="SETTINGS" />
-                <View style={styles.group}>
+                <View style={[styles.group, { backgroundColor: colors.groupBg, borderColor: colors.border }]}>
                     <SettingRowWithSwitch
                         icon="🔔"
                         label="Push Notifications"
@@ -224,8 +277,8 @@ const ProfileScreen = () => {
                     <SettingRowWithSwitch
                         icon="🌙"
                         label="Dark Mode"
-                        value={darkMode}
-                        onValueChange={setDarkMode}
+                        value={isDarkMode}
+                        onValueChange={toggleTheme}
                     />
                     <SettingRow
                         icon="🌍"
@@ -238,13 +291,13 @@ const ProfileScreen = () => {
 
                 {/* INTEGRATIONS */}
                 <SectionHeader title="INTEGRATIONS" />
-                <View style={styles.group}>
+                <View style={[styles.group, { backgroundColor: colors.groupBg, borderColor: colors.border }]}>
                     <SettingRow
                         icon="📱"
                         label="Telegram Bot"
                         value={telegramLinked ? '✓ Linked' : 'Not linked'}
                         status={
-                            isPremium 
+                            isPremium
                                 ? `👑 Premium until ${new Date(premiumUntil).toLocaleDateString()}`
                                 : (telegramLinked ? 'Receiving notifications' : 'Connect for alerts')
                         }
@@ -254,29 +307,32 @@ const ProfileScreen = () => {
 
                 {/* ACCOUNT */}
                 <SectionHeader title="ACCOUNT" />
-                <View style={styles.group}>
-                    <SettingRow icon="👤" label="Profile Information" onPress={() => {}} />
-                    <SettingRow icon="🔒" label="Change Password" onPress={() => {}} />
+                <View style={[styles.group, { backgroundColor: colors.groupBg, borderColor: colors.border }]}>
+                    <SettingRow icon="👤" label="Profile Information" onPress={() => { }} />
+                    <SettingRow icon="🔒" label="Change Password" onPress={() => { }} />
                     <SettingRow icon="✉️" label="Email Verification" value="Verified" />
                 </View>
 
                 {/* SUPPORT */}
                 <SectionHeader title="SUPPORT" />
-                <View style={styles.group}>
-                    <SettingRow icon="❓" label="Help & FAQ" onPress={() => {}} />
-                    <SettingRow icon="📞" label="Contact Support" onPress={() => {}} />
-                    <SettingRow icon="⭐" label="Rate the App" onPress={() => {}} />
+                <View style={[styles.group, { backgroundColor: colors.groupBg, borderColor: colors.border }]}>
+                    <SettingRow icon="❓" label="Help & FAQ" onPress={() => { }} />
+                    <SettingRow icon="📞" label="Contact Support" onPress={() => { }} />
+                    <SettingRow icon="⭐" label="Rate the App" onPress={() => { }} />
                 </View>
 
                 {/* LEGAL */}
                 <SectionHeader title="LEGAL" />
-                <View style={styles.group}>
-                    <SettingRow icon="📄" label="Terms of Service" onPress={() => {}} />
-                    <SettingRow icon="🛡️" label="Privacy Policy" onPress={() => {}} />
+                <View style={[styles.group, { backgroundColor: colors.groupBg, borderColor: colors.border }]}>
+                    <SettingRow icon="📄" label="Terms of Service" onPress={() => { }} />
+                    <SettingRow icon="🛡️" label="Privacy Policy" onPress={() => { }} />
                 </View>
 
                 {/* SIGN OUT */}
-                <TouchableOpacity style={styles.signOutBtn}>
+                <TouchableOpacity
+                    style={[styles.signOutBtn, isDarkMode && { backgroundColor: 'rgba(239, 68, 68, 0.1)', borderColor: 'rgba(239, 68, 68, 0.2)' }]}
+                    onPress={handleSignOut}
+                >
                     <Text style={styles.signOutText}>→ Sign Out</Text>
                 </TouchableOpacity>
 
@@ -465,29 +521,36 @@ const styles = StyleSheet.create({
     // Profile Header
     profileHeader: {
         alignItems: 'center',
-        padding: 30,
+        paddingTop: 60,
         paddingBottom: 40,
+        paddingHorizontal: 20,
+        overflow: 'hidden',
     },
     avatarContainer: {
-        width: 80,
-        height: 80,
-        borderRadius: 40,
-        backgroundColor: 'rgba(255,255,255,0.3)',
+        width: 90,
+        height: 90,
+        borderRadius: 45,
+        backgroundColor: 'rgba(255,255,255,0.15)',
         justifyContent: 'center',
         alignItems: 'center',
-        marginBottom: 10,
+        marginBottom: 12,
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.3)',
         shadowColor: '#000',
-        shadowOpacity: 0.1,
-        shadowRadius: 10,
+        shadowOpacity: 0.2,
+        shadowRadius: 15,
+        elevation: 10,
     },
-    avatarText: { fontSize: 32, color: '#FFF', fontWeight: '800' },
-    userName: { fontSize: 20, fontWeight: '800', color: '#FFF', marginBottom: 5 },
+    avatarText: { fontSize: 36, color: '#FFF', fontWeight: '900' },
+    userName: { fontSize: 24, fontWeight: '900', color: '#FFF', marginBottom: 4, letterSpacing: -0.5 },
     planBadge: {
-        backgroundColor: 'rgba(255,255,255,0.2)',
-        paddingHorizontal: 10,
-        paddingVertical: 4,
-        borderRadius: 12,
-        marginBottom: 15,
+        backgroundColor: 'rgba(255,255,255,0.25)',
+        paddingHorizontal: 14,
+        paddingVertical: 6,
+        borderRadius: 20,
+        marginBottom: 20,
+        borderWidth: 0.5,
+        borderColor: 'rgba(255,255,255,0.4)',
     },
     planText: { fontSize: 12, fontWeight: '600', color: '#FFF' },
     upgradeBtn: {
@@ -509,39 +572,41 @@ const styles = StyleSheet.create({
     statsRow: {
         flexDirection: 'row',
         justifyContent: 'space-between',
-        padding: 20,
-        marginTop: -15,
-        paddingHorizontal: 10,
+        padding: 15,
+        marginTop: -25,
+        paddingHorizontal: 15,
     },
     statBox: {
         flex: 1,
         backgroundColor: '#FFF',
         padding: 15,
-        borderRadius: 16,
+        borderRadius: 20,
         alignItems: 'center',
         marginHorizontal: 5,
         shadowColor: '#000',
-        shadowOpacity: 0.05,
-        shadowRadius: 5,
-        elevation: 2,
+        shadowOpacity: 0.08,
+        shadowRadius: 12,
+        shadowOffset: { width: 0, height: 4 },
+        elevation: 4,
     },
     statValue: { fontSize: 18, fontWeight: '800', color: '#1F2937', marginBottom: 2 },
     statLabel: { fontSize: 12, fontWeight: '600', color: '#9CA3AF' },
 
     // Sections
-    sectionHeader: { paddingHorizontal: 20, marginTop: 20, marginBottom: 8 },
-    sectionTitle: { fontSize: 12, fontWeight: '800', color: '#9CA3AF', letterSpacing: 1 },
+    sectionHeader: { paddingHorizontal: 20, marginTop: 25, marginBottom: 12 },
+    sectionTitle: { fontSize: 11, fontWeight: '900', letterSpacing: 2 },
 
     // Groups
     group: {
-        backgroundColor: '#FFF',
-        borderTopWidth: 1,
-        borderBottomWidth: 1,
-        borderColor: '#F3F4F6',
-        marginHorizontal: 10,
+        borderWidth: 1,
+        borderColor: 'rgba(0,0,0,0.03)',
+        marginHorizontal: 15,
         marginBottom: 10,
-        borderRadius: 12,
+        borderRadius: 20,
         overflow: 'hidden',
+        shadowColor: '#000',
+        shadowOpacity: 0.02,
+        shadowRadius: 10,
     },
     settingRow: {
         flexDirection: 'row',
@@ -553,9 +618,9 @@ const styles = StyleSheet.create({
         borderBottomWidth: 1,
         borderBottomColor: '#F3F4F6',
     },
-    settingLabel: { fontSize: 16, fontWeight: '500', color: '#374151' },
-    statusText: { fontSize: 12, color: '#9CA3AF', marginTop: 4 },
-    settingValue: { color: '#9CA3AF', fontSize: 14 },
+    settingLabel: { fontSize: 16, fontWeight: '600' },
+    statusText: { fontSize: 12, marginTop: 4 },
+    settingValue: { fontSize: 14 },
 
     // Sign Out
     signOutBtn: {
@@ -665,7 +730,7 @@ const styles = StyleSheet.create({
         flex: 1,
         padding: 12,
         borderRadius: 10,
-        backgroundColor: '#FF8A65',
+        backgroundColor: '#4F46E5', // Changed from FF8A65
         alignItems: 'center',
         justifyContent: 'center',
     },

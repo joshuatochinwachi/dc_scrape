@@ -1,10 +1,11 @@
 import React, { useContext, useState, useEffect } from 'react';
-import { StyleSheet, View, Text, ScrollView, Image, TouchableOpacity, Linking, Share, Dimensions, StatusBar } from 'react-native';
+import { StyleSheet, View, Text, ScrollView, Image, TouchableOpacity, Linking, Share, Dimensions } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SavedContext } from '../context/SavedContext';
+import { UserContext } from '../context/UserContext';
 import Constants from '../Constants';
 
 const { width } = Dimensions.get('window');
@@ -14,6 +15,34 @@ const ProductDetailScreen = ({ route, navigation }) => {
     const [loading, setLoading] = React.useState(false);
     const [copiedLabel, setCopiedLabel] = useState(null);
     const { toggleSave, isSaved } = useContext(SavedContext);
+    const { isDarkMode } = useContext(UserContext);
+    const brand = Constants.BRAND;
+
+    const colors = isDarkMode ? {
+        bg: brand.DARK_BG,
+        card: '#161617',
+        subCard: '#1C1C1E',
+        text: '#F4F4F5', // Softer White
+        textSecondary: '#A1A1AA', // Better contrast Zinc-400
+        border: 'rgba(255,255,255,0.06)',
+        divider: 'rgba(255,255,255,0.04)',
+        noteBg: 'rgba(251, 191, 36, 0.08)',
+        noteBorder: 'rgba(251, 191, 36, 0.15)',
+        noteText: '#FCD34D',
+        accent: '#6366F1' // Indigo
+    } : {
+        bg: '#F8F9FE',
+        card: '#FFFFFF',
+        subCard: '#F9FAFB',
+        text: '#1C1C1E',
+        textSecondary: '#636366',
+        border: 'rgba(0,0,0,0.05)',
+        divider: 'rgba(0,0,0,0.05)',
+        noteBg: '#FFFAED',
+        noteBorder: '#FCD34D',
+        noteText: '#92400E',
+        accent: brand.BLUE
+    };
 
     // Handle both direct navigation and deep link
     React.useEffect(() => {
@@ -40,8 +69,6 @@ const ProductDetailScreen = ({ route, navigation }) => {
 
     const data = product.product_data || {};
     const saved = isSaved(product.id);
-    const isDarkMode = false; // Assuming light mode for now based on screenshot
-    const brand = Constants.BRAND;
 
     // Calculate Fees & Profit
     const buyPrice = parseFloat(data.price || '0');
@@ -62,7 +89,7 @@ const ProductDetailScreen = ({ route, navigation }) => {
             const deepLink = `hollowscan://product/${product.id}`;
 
             // Create share message with deep link
-            const message = `🔥 Check out this deal from ${brand}!\n\n📦 ${data.title}\n💵 Buy: $${data.price}\n💰 Sell: $${data.resell}\n📈 Profit: $${formattedProfit} (ROI: ${roi}%)\n\nOpen in app: ${deepLink}`;
+            const message = `🔥 Check out this deal from HollowScan!\n\n📦 ${data.title}\n💵 Buy: ${formatPriceDisplay(buyPrice, product.region)}\n💰 Sell: ${formatPriceDisplay(sellPrice, product.region)}\n📈 Profit: ${formatPriceDisplay(netProfit, product.region)} (ROI: ${roi}%)\n\nOpen in app: ${deepLink}`;
 
             await Share.share({
                 message: message,
@@ -83,9 +110,9 @@ const ProductDetailScreen = ({ route, navigation }) => {
         >
             <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
                 <Text style={{ marginRight: 10, fontSize: 16 }}>{icon}</Text>
-                <Text style={styles.linkText}>{label}</Text>
+                <Text style={[styles.linkText, { color: colors.text }]}>{label}</Text>
             </View>
-            <Text style={{ color: brand.BLUE, fontSize: 16, fontWeight: '700' }}>›</Text>
+            <Text style={{ color: colors.textSecondary, fontSize: 16, fontWeight: '700' }}>›</Text>
         </TouchableOpacity>
     );
 
@@ -106,6 +133,37 @@ const ProductDetailScreen = ({ route, navigation }) => {
     const isCopyable = (label) => {
         const lowerLabel = (label || '').toLowerCase();
         return ['pid', 'sku', 'barcode', 'id', 'ean', 'upc', 'asin'].some(k => lowerLabel.includes(k));
+    };
+
+    // --- HELPERS ---
+    const formatPriceDisplay = (value, region) => {
+        if (!value || isNaN(value) || value === 0) {
+            if (region?.includes('UK')) return '£0.00';
+            if (region?.includes('Canada')) return 'CAD 0.00';
+            return '$0.00';
+        }
+
+        const num = parseFloat(value);
+
+        // Custom formatting for CAD to meet user requirement "CAD 74.00"
+        if (region?.includes('Canada')) {
+            const usd = (num * 0.73).toFixed(0);
+            return `CAD ${num.toFixed(2)} (USD ${usd})`;
+        }
+
+        const formatted = new Intl.NumberFormat('en-US', {
+            style: 'currency',
+            currency: region?.includes('UK') ? 'GBP' : 'USD',
+            minimumFractionDigits: 2
+        }).format(num);
+
+        // Add USD equivalent for UK
+        if (region?.includes('UK')) {
+            const usd = (num * 1.25).toFixed(0);
+            return `${formatted} (USD ${usd})`;
+        }
+
+        return formatted;
     };
 
     // Helper to render price with strikethrough
@@ -146,126 +204,88 @@ const ProductDetailScreen = ({ route, navigation }) => {
     const visibleDetails = data.details ? data.details.filter(d => !d.is_redundant) : [];
 
     return (
-        <SafeAreaView style={styles.container} edges={['top']}>
-            {copiedLabel && (
+        <SafeAreaView style={[styles.container, { backgroundColor: colors.bg }]} edges={['top']}>
+            {copiedLabel ? (
                 <View style={styles.copiedToast}>
                     <Text style={styles.copiedToastText}>Copied {copiedLabel} To Clipboard!</Text>
                 </View>
-            )}
-            {/* MODERN HEADER */}
-            <View style={styles.header}>
-                <TouchableOpacity
-                    onPress={() => navigation.goBack()}
-                    style={[styles.headerBtn, { backgroundColor: brand.BLUE + '15' }]}
-                >
-                    <Text style={{ fontSize: 18, color: brand.BLUE }}>←</Text>
+            ) : null}
+
+            <View style={[styles.header, { borderBottomColor: colors.border, backgroundColor: colors.card }]}>
+                <TouchableOpacity onPress={() => navigation.goBack()} style={{ padding: 8 }}>
+                    <Text style={{ fontSize: 24, color: colors.text }}>✕</Text>
                 </TouchableOpacity>
-                <Text style={styles.headerTitle}>Deal Details</Text>
-                <View style={{ flexDirection: 'row', gap: 8 }}>
-                    <TouchableOpacity
-                        onPress={handleShare}
-                        style={[styles.headerBtn, { backgroundColor: brand.PURPLE + '15' }]}
-                    >
-                        <Text style={{ fontSize: 18 }}>↗</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                        onPress={() => toggleSave(product)}
-                        style={[styles.headerBtn, { backgroundColor: saved ? '#EF4444' : '#E5E5E5' }]}
-                    >
-                        <Text style={{ fontSize: 18 }}>{saved ? '❤️' : '🤍'}</Text>
-                    </TouchableOpacity>
-                </View>
+                <Text style={[styles.headerTitle, { color: colors.text }]}>Deal Details</Text>
+                <TouchableOpacity onPress={handleShare} style={{ padding: 8 }}>
+                    <Text style={{ fontSize: 22 }}>📤</Text>
+                </TouchableOpacity>
             </View>
 
             <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-                {/* HERO IMAGE WITH GRADIENT */}
-                <View style={styles.imageContainer}>
-                    <Image
-                        source={{ uri: data.image || 'https://via.placeholder.com/400' }}
-                        style={styles.image}
-                    />
-                    <LinearGradient
-                        colors={['transparent', 'rgba(0, 0, 0, 0.3)']}
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 0, y: 1 }}
-                        style={styles.imageGradient}
-                    />
+                {/* IMAGE HERO */}
+                <View style={[styles.imageContainer, { backgroundColor: colors.card, borderColor: colors.border }]}>
+                    <Image source={{ uri: data.thumbnail || 'https://via.placeholder.com/300' }} style={styles.image} resizeMode="contain" />
+                    <TouchableOpacity
+                        style={[styles.saveBtn, { backgroundColor: isDarkMode ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.8)' }]}
+                        onPress={() => toggleSave(product)}
+                    >
+                        <Text style={{ fontSize: 24, color: saved ? '#EF4444' : (isDarkMode ? '#444' : '#9CA3AF') }}>{saved ? '❤️' : '🤍'}</Text>
+                    </TouchableOpacity>
+                    <View style={[styles.regionBadge, { backgroundColor: brand.BLUE }]}>
+                        <Text style={styles.regionText}>{product.region === 'UK Stores' ? '🇬🇧 UK Store' : product.region === 'Canada Stores' ? '🇨🇦 Canada' : '🇺🇸 USA Store'}</Text>
+                    </View>
                 </View>
 
-                {/* TITLE SECTION */}
-                <View style={styles.section}>
-                    <Text style={styles.title}>{data.title}</Text>
-                    <View style={styles.tagsRow}>
-                        <LinearGradient
-                            colors={[brand.BLUE + '20', brand.PURPLE + '15']}
-                            start={{ x: 0, y: 0 }}
-                            end={{ x: 1, y: 0 }}
-                            style={styles.tag}
-                        >
-                            <Text style={[styles.tagText, { color: brand.BLUE }]}>📁 {product.category_name}</Text>
-                        </LinearGradient>
-                        <View style={[styles.tag, { backgroundColor: '#F0F0F0' }]}>
-                            <Text style={styles.tagText}>
-                                {product.region?.includes('UK') ? '🇬🇧 UK' :
-                                    product.region?.includes('Canada') ? '🇨🇦 CA' :
-                                        product.region?.includes('USA') ? '🇺🇸 US' : '🏷️ Deal'}
-                            </Text>
-                        </View>
-                        <View style={[styles.tag, { backgroundColor: '#E0F2FE' }]}>
-                            <Text style={[styles.tagText, { color: brand.BLUE }]}>📅 Today</Text>
+                {/* PRODUCT TITLE */}
+                <View style={styles.titleSection}>
+                    <Text style={[styles.title, { color: colors.text }]}>{data.title || 'Product Name'}</Text>
+                    <View style={styles.metaRow}>
+                        <Text style={[styles.retailer, { color: brand.BLUE }]}>{data.retailer || 'Unknown Retailer'}</Text>
+                        <View style={[styles.statusBadge, { backgroundColor: isDarkMode ? 'rgba(16, 185, 129, 0.1)' : '#F0FDF4' }]}>
+                            <Text style={[styles.statusText, { color: '#10B981' }]}>✓ In Stock</Text>
                         </View>
                     </View>
                 </View>
 
-                {/* PROFIT CALCULATOR - ENHANCED */}
-                {buyPrice > 0 && (
+                {/* PROFIT ANALYSIS BOX */}
+                {sellPrice > 0 ? (
                     <LinearGradient
-                        colors={['#F0F7FF', '#E0F2FE']}
+                        colors={[brand.BLUE, brand.PURPLE]}
                         start={{ x: 0, y: 0 }}
                         end={{ x: 1, y: 1 }}
-                        style={styles.profitCard}
+                        style={styles.profitBox}
                     >
-                        <View style={styles.cardHeader}>
-                            <Text style={styles.cardTitle}>📊 Profit Analysis</Text>
+                        <View style={styles.profitHeader}>
+                            <Text style={[styles.profitTitle, { color: '#FFF' }]}>Estimated Profit Analysis</Text>
+                            <View style={styles.roiBadge}>
+                                <Text style={styles.roiText}>{roi}% ROI</Text>
+                            </View>
                         </View>
+
                         <View style={styles.profitGrid}>
                             <View style={styles.profitItem}>
-                                <Text style={styles.profitLabel}>BUY PRICE</Text>
-                                <Text style={[styles.profitValue, { color: '#666' }]}>
-                                    {data.price_display ? renderPriceValue(data.price_display) : `$${buyPrice.toFixed(2)}`}
-                                </Text>
+                                <Text style={[styles.pLabel, { color: 'rgba(255,255,255,0.7)' }]}>Purchase</Text>
+                                <Text style={[styles.pValue, { color: '#FFF' }]}>{formatPriceDisplay(buyPrice, product.region)}</Text>
                             </View>
-                            {sellPrice > 0 && (
-                                <>
-                                    <View style={[styles.profitItem, { borderLeftWidth: 1, borderLeftColor: 'rgba(0,0,0,0.1)', paddingLeft: 16 }]}>
-                                        <Text style={styles.profitLabel}>SELL PRICE</Text>
-                                        <Text style={[styles.profitValue, { color: brand.PURPLE }]}>
-                                            ${sellPrice.toFixed(2)}
-                                        </Text>
-                                    </View>
-                                    <View style={[styles.profitItem, { borderLeftWidth: 1, borderLeftColor: 'rgba(0,0,0,0.1)', paddingLeft: 16 }]}>
-                                        <Text style={styles.profitLabel}>NET PROFIT</Text>
-                                        <Text style={[styles.profitValue, { color: profitColor, fontWeight: '900' }]}>
-                                            ${formattedProfit}
-                                        </Text>
-                                    </View>
-                                    <View style={[styles.profitItem, { borderLeftWidth: 1, borderLeftColor: 'rgba(0,0,0,0.1)', paddingLeft: 16 }]}>
-                                        <Text style={styles.profitLabel}>ROI %</Text>
-                                        <Text style={[styles.profitValue, { color: roi > 0 ? '#10B981' : '#EF4444', fontWeight: '900' }]}>
-                                            {roi}%
-                                        </Text>
-                                    </View>
-                                </>
-                            )}
+                            <View style={[styles.pDivider, { backgroundColor: 'rgba(255,255,255,0.15)' }]} />
+                            <View style={styles.profitItem}>
+                                <Text style={[styles.pLabel, { color: 'rgba(255,255,255,0.7)' }]}>Fees (15%)</Text>
+                                <Text style={[styles.pValue, { color: '#FFF' }]}>{formatPriceDisplay(fees, product.region)}</Text>
+                            </View>
+                            <View style={[styles.pDivider, { backgroundColor: 'rgba(255,255,255,0.15)' }]} />
+                            <View style={styles.profitItem}>
+                                <Text style={[styles.pLabel, { color: 'rgba(255,255,255,0.7)' }]}>Net Profit</Text>
+                                <Text style={[styles.pNetValue, { color: '#FFF' }]}>+{formatPriceDisplay(netProfit, product.region)}</Text>
+                            </View>
                         </View>
                     </LinearGradient>
-                )}
+                ) : null}
 
                 {/* DESCRIPTION SECTION */}
                 {data.description ? (
                     <View style={styles.section}>
-                        <Text style={[styles.sectionTitle, { color: '#000' }]}>📝 Description</Text>
-                        <Text style={styles.descriptionText}>{data.description}</Text>
+                        <Text style={[styles.sectionTitle, { color: colors.text }]}>📝 Description</Text>
+                        <Text style={[styles.descriptionText, { color: colors.textSecondary }]}>{data.description}</Text>
                     </View>
                 ) : null}
 
@@ -273,10 +293,10 @@ const ProductDetailScreen = ({ route, navigation }) => {
                 {visibleDetails.length > 0 && (
                     <View style={styles.section}>
                         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-                            <Text style={[styles.sectionTitle, { color: '#000', marginBottom: 0 }]}>📋 Product Details</Text>
-                            <Text style={{ fontSize: 11, color: '#999', fontWeight: '600' }}>Tap Item to Copy</Text>
+                            <Text style={[styles.sectionTitle, { color: colors.text, marginBottom: 0 }]}>📋 Product Details</Text>
+                            <Text style={{ fontSize: 11, color: colors.textSecondary, fontWeight: '600' }}>Tap Item to Copy</Text>
                         </View>
-                        <View style={styles.detailsContainer}>
+                        <View style={[styles.detailsContainer, { backgroundColor: colors.subCard, borderColor: colors.border }]}>
                             {visibleDetails.map((detail, idx) => {
                                 const copyable = isCopyable(detail.label);
                                 return (
@@ -286,10 +306,10 @@ const ProductDetailScreen = ({ route, navigation }) => {
                                         onPress={() => copyable && copyToClipboard(detail.value, detail.label)}
                                         style={[styles.detailRow, idx === visibleDetails.length - 1 && { borderBottomWidth: 0 }]}
                                     >
-                                        <Text style={styles.detailLabel}>{detail.label}</Text>
+                                        <Text style={[styles.detailLabel, { color: colors.textSecondary }]}>{detail.label}</Text>
                                         <View style={{ flex: 1, flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center' }}>
-                                            <Text style={styles.detailValue}>{detail.value}</Text>
-                                            {copyable && <Text style={{ marginLeft: 6, fontSize: 12, opacity: 0.3 }}>📋</Text>}
+                                            <Text style={[styles.detailValue, { color: colors.text }]}>{detail.value}</Text>
+                                            {copyable && <Text style={{ marginLeft: 6, fontSize: 12, opacity: 0.3, color: colors.textSecondary }}>📋</Text>}
                                         </View>
                                     </TouchableOpacity>
                                 );
@@ -300,8 +320,8 @@ const ProductDetailScreen = ({ route, navigation }) => {
 
                 {/* RESEARCH LINKS SECTION */}
                 <View style={styles.section}>
-                    <Text style={[styles.sectionTitle, { color: '#000' }]}>🔍 Research This Product</Text>
-                    <View style={styles.linksContainer}>
+                    <Text style={[styles.sectionTitle, { color: colors.text }]}>🔍 Research This Product</Text>
+                    <View style={[styles.linksContainer, { backgroundColor: colors.card, borderColor: colors.border }]}>
                         {/* eBay Link */}
                         <LinkRow icon="🏷️" label="eBay Sold Listings" url={ebayLink} />
                         {/* Amazon Link */}
@@ -324,8 +344,8 @@ const ProductDetailScreen = ({ route, navigation }) => {
 
                 {/* WHERE TO BUY SECTION - ALL OPTIONS */}
                 <View style={styles.section}>
-                    <Text style={[styles.sectionTitle, { color: '#000' }]}>🛒 Where to Buy</Text>
-                    <View style={styles.linksContainer}>
+                    <Text style={[styles.sectionTitle, { color: colors.text }]}>🛒 Where to Buy</Text>
+                    <View style={[styles.linksContainer, { backgroundColor: colors.card, borderColor: colors.border }]}>
                         {/* Primary Buy Link */}
                         {data.buy_url && (
                             <TouchableOpacity
@@ -334,8 +354,8 @@ const ProductDetailScreen = ({ route, navigation }) => {
                                 activeOpacity={0.7}
                             >
                                 <View>
-                                    <Text style={styles.buyLabel}>Buy Now</Text>
-                                    <Text style={styles.buySource}>Retail Price</Text>
+                                    <Text style={[styles.buyLabel, { color: colors.text }]}>Buy Now</Text>
+                                    <Text style={[styles.buySource, { color: colors.textSecondary }]}>Retail Price</Text>
                                 </View>
                                 <Text style={[styles.buyPrice, { color: '#10B981' }]}>
                                     ${buyPrice.toFixed(2)}
@@ -347,15 +367,15 @@ const ProductDetailScreen = ({ route, navigation }) => {
                         {data.links && data.links.buy && data.links.buy.length > 0 && (
                             data.links.buy.map((link, idx) => (
                                 <View key={idx}>
-                                    {idx > 0 && <View style={[styles.divider, { marginVertical: 8 }]} />}
+                                    {idx > 0 && <View style={[styles.divider, { marginVertical: 8, backgroundColor: colors.divider }]} />}
                                     <TouchableOpacity
                                         style={styles.buyRow}
                                         onPress={() => Linking.openURL(link.url)}
                                         activeOpacity={0.7}
                                     >
                                         <View>
-                                            <Text style={styles.buyLabel}>{link.text || 'Buy Here'}</Text>
-                                            <Text style={styles.buySource}>Retail Retailer</Text>
+                                            <Text style={[styles.buyLabel, { color: colors.text }]}>{link.text || 'Buy Here'}</Text>
+                                            <Text style={[styles.buySource, { color: colors.textSecondary }]}>Retail Retailer</Text>
                                         </View>
                                         <Text style={[styles.buyPrice, { color: '#10B981' }]}>
                                             Visit ›
@@ -366,15 +386,15 @@ const ProductDetailScreen = ({ route, navigation }) => {
                         )}
 
                         {/* Resale Options */}
-                        <View style={[styles.divider, { marginVertical: 12 }]} />
+                        <View style={[styles.divider, { marginVertical: 12, backgroundColor: colors.divider }]} />
                         <TouchableOpacity
                             style={styles.buyRow}
                             onPress={() => Linking.openURL(ebayLink)}
                             activeOpacity={0.7}
                         >
                             <View>
-                                <Text style={styles.buyLabel}>Resell on eBay</Text>
-                                <Text style={styles.buySource}>View Similar Sales</Text>
+                                <Text style={[styles.buyLabel, { color: colors.text }]}>Resell on eBay</Text>
+                                <Text style={[styles.buySource, { color: colors.textSecondary }]}>View Similar Sales</Text>
                             </View>
                             <Text style={[styles.buyPrice, { color: brand.PURPLE }]}>
                                 ${sellPrice.toFixed(2)}
@@ -384,7 +404,7 @@ const ProductDetailScreen = ({ route, navigation }) => {
                         {/* FBA Links */}
                         {data.links && data.links.fba && data.links.fba.length > 0 && (
                             <>
-                                <View style={[styles.divider, { marginVertical: 8 }]} />
+                                <View style={[styles.divider, { marginVertical: 8, backgroundColor: colors.divider }]} />
                                 {data.links.fba.map((link, idx) => (
                                     <TouchableOpacity
                                         key={idx}
@@ -393,8 +413,8 @@ const ProductDetailScreen = ({ route, navigation }) => {
                                         activeOpacity={0.7}
                                     >
                                         <View>
-                                            <Text style={styles.buyLabel}>{link.text || 'Amazon FBA'}</Text>
-                                            <Text style={styles.buySource}>Alternative Source</Text>
+                                            <Text style={[styles.buyLabel, { color: colors.text }]}>{link.text || 'Amazon FBA'}</Text>
+                                            <Text style={[styles.buySource, { color: colors.textSecondary }]}>Alternative Source</Text>
                                         </View>
                                         <Text style={[styles.buyPrice, { color: brand.BLUE }]}>
                                             Check ›
@@ -408,11 +428,11 @@ const ProductDetailScreen = ({ route, navigation }) => {
 
                 {/* NOTES */}
                 <View style={styles.section}>
-                    <Text style={[styles.sectionTitle, { color: '#000' }]}>📝 Deal Info</Text>
-                    <View style={[styles.noteCard, { backgroundColor: '#FFFAED', borderColor: '#FCD34D' }]}>
+                    <Text style={[styles.sectionTitle, { color: colors.text }]}>📝 Deal Info</Text>
+                    <View style={[styles.noteCard, { backgroundColor: colors.noteBg, borderColor: colors.noteBorder }]}>
                         <Text style={{ fontSize: 20, marginRight: 10 }}>💡</Text>
                         <View style={{ flex: 1 }}>
-                            <Text style={styles.noteText}>
+                            <Text style={[styles.noteText, { color: colors.noteText }]}>
                                 This deal was posted in {product.category_name}. Verify prices and stock before committing.
                             </Text>
                         </View>
@@ -423,12 +443,12 @@ const ProductDetailScreen = ({ route, navigation }) => {
             </ScrollView>
 
             {/* BOTTOM ACTION BAR */}
-            <View style={styles.bottomBar}>
+            <View style={[styles.bottomBar, { backgroundColor: colors.card, borderTopColor: colors.border }]}>
                 <TouchableOpacity
-                    style={[styles.actionBtn, { backgroundColor: '#F5F5F5', flex: 1 }]}
+                    style={[styles.actionBtn, { backgroundColor: colors.subCard, flex: 1 }]}
                     onPress={() => toggleSave(product)}
                 >
-                    <Text style={styles.actionBtnText}>{saved ? '❤️ Saved' : '🤍 Save'}</Text>
+                    <Text style={[styles.actionBtnText, { color: colors.text }]}>{saved ? '❤️ Saved' : '🤍 Save'}</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                     style={[styles.actionBtn, { backgroundColor: brand.BLUE, flex: 1, marginLeft: 10 }]}
@@ -448,7 +468,7 @@ const ProductDetailScreen = ({ route, navigation }) => {
 };
 
 const styles = StyleSheet.create({
-    container: { flex: 1, backgroundColor: '#FFFFFF' },
+    container: { flex: 1 },
 
     header: {
         flexDirection: 'row',
@@ -456,9 +476,7 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         paddingHorizontal: 16,
         paddingVertical: 12,
-        backgroundColor: '#FFFFFF',
         borderBottomWidth: 1,
-        borderBottomColor: 'rgba(0, 0, 0, 0.05)'
     },
     headerBtn: {
         width: 40,
@@ -471,7 +489,6 @@ const styles = StyleSheet.create({
     headerTitle: {
         fontSize: 18,
         fontWeight: '900',
-        color: '#000',
         flex: 1,
         textAlign: 'center'
     },
@@ -481,17 +498,17 @@ const styles = StyleSheet.create({
     imageContainer: {
         width: '100%',
         height: 320,
-        backgroundColor: '#F0F0F0',
         borderRadius: 20,
         marginBottom: 20,
         overflow: 'hidden',
+        borderWidth: 1,
         shadowColor: '#000',
         shadowOffset: { width: 0, height: 8 },
         shadowOpacity: 0.1,
         shadowRadius: 12,
         elevation: 5
     },
-    image: { width: '100%', height: '100%', resizeMode: 'contain' },
+    image: { width: '100%', height: '100%', borderRadius: 20 },
     imageGradient: {
         position: 'absolute',
         bottom: 0,
@@ -500,8 +517,8 @@ const styles = StyleSheet.create({
         height: 100
     },
 
-    section: { marginBottom: 28 },
-    title: { fontSize: 24, fontWeight: '900', marginBottom: 14, color: '#000', lineHeight: 32 },
+    section: { marginBottom: 32 },
+    title: { fontSize: 22, fontWeight: '900', marginBottom: 12, lineHeight: 30, letterSpacing: -0.5 },
 
     tagsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
     tag: {
@@ -527,7 +544,7 @@ const styles = StyleSheet.create({
         elevation: 4
     },
     cardHeader: { marginBottom: 16 },
-    cardTitle: { fontSize: 17, fontWeight: '900', color: '#000' },
+    cardTitle: { fontSize: 17, fontWeight: '900' },
 
     profitGrid: {
         flexDirection: 'row',
@@ -542,7 +559,6 @@ const styles = StyleSheet.create({
         fontSize: 10,
         fontWeight: '800',
         letterSpacing: 0.5,
-        color: '#666',
         marginBottom: 6,
         textTransform: 'uppercase'
     },
@@ -550,24 +566,19 @@ const styles = StyleSheet.create({
 
     divider: {
         height: 1,
-        backgroundColor: 'rgba(0, 0, 0, 0.1)',
-        marginVertical: 12
     },
 
     sectionTitle: {
         fontSize: 16,
         fontWeight: '900',
         marginBottom: 14,
-        color: '#000',
         letterSpacing: 0.3
     },
 
     linksContainer: {
-        backgroundColor: '#F8F9FE',
-        borderRadius: 16,
+        borderRadius: 20,
         overflow: 'hidden',
         borderWidth: 1,
-        borderColor: 'rgba(45, 130, 255, 0.1)'
     },
 
     linkRow: {
@@ -576,28 +587,24 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         padding: 14,
         borderBottomWidth: 1,
-        borderBottomColor: 'rgba(0, 0, 0, 0.05)'
     },
-    linkText: { fontSize: 14, fontWeight: '600', color: '#000', flex: 1 },
+    linkText: { fontSize: 14, fontWeight: '600', flex: 1 },
 
     descriptionText: { fontSize: 14, color: '#4B5563', lineHeight: 22, fontWeight: '500' },
 
     detailsContainer: {
-        backgroundColor: '#F9FAFB',
-        borderRadius: 16,
+        borderRadius: 20,
         padding: 4,
         borderWidth: 1,
-        borderColor: '#E5E7EB'
     },
     detailRow: {
         flexDirection: 'row',
         justifyContent: 'space-between',
         padding: 12,
         borderBottomWidth: 1,
-        borderBottomColor: '#F3F4F6'
     },
-    detailLabel: { fontSize: 13, color: '#6B7280', fontWeight: '700', textTransform: 'uppercase' },
-    detailValue: { fontSize: 13, color: '#111827', fontWeight: '600', flex: 1, textAlign: 'right', marginLeft: 10 },
+    detailLabel: { fontSize: 13, fontWeight: '700', textTransform: 'uppercase' },
+    detailValue: { fontSize: 13, fontWeight: '600', flex: 1, textAlign: 'right', marginLeft: 10 },
 
     buyRow: {
         flexDirection: 'row',
@@ -606,8 +613,8 @@ const styles = StyleSheet.create({
         paddingVertical: 12,
         paddingHorizontal: 14
     },
-    buyLabel: { fontSize: 15, fontWeight: '700', color: '#000' },
-    buySource: { fontSize: 12, color: '#999', marginTop: 2, fontWeight: '500' },
+    buyLabel: { fontSize: 15, fontWeight: '700' },
+    buySource: { fontSize: 12, marginTop: 2, fontWeight: '500' },
     buyPrice: { fontSize: 16, fontWeight: '900' },
 
     noteCard: {
@@ -618,7 +625,7 @@ const styles = StyleSheet.create({
         borderRadius: 12,
         borderWidth: 1
     },
-    noteText: { fontSize: 13, fontWeight: '600', color: '#000', lineHeight: 18 },
+    noteText: { fontSize: 13, fontWeight: '600', lineHeight: 18 },
 
     bottomBar: {
         position: 'absolute',
@@ -629,9 +636,7 @@ const styles = StyleSheet.create({
         paddingHorizontal: 16,
         paddingVertical: 14,
         paddingBottom: 24,
-        backgroundColor: '#FFFFFF',
         borderTopWidth: 1,
-        borderTopColor: 'rgba(0, 0, 0, 0.05)',
         gap: 10,
         shadowColor: '#000',
         shadowOffset: { width: 0, height: -4 },

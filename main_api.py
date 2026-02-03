@@ -5,7 +5,7 @@ Professional FastAPI backend for hollowScan Mobile App.
 Provides endpoints for feed, categories, and subscription management.
 """
  
-from fastapi import FastAPI, HTTPException, Depends, Query, Header
+from fastapi import FastAPI, HTTPException, Depends, Query, Header, Body
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 import re
@@ -145,10 +145,120 @@ def create_user(email: str = None, apple_id: str = None) -> Optional[Dict]:
             timeout=10
         )
         if response.status_code in [200, 201]:
-            return response.json()[0] if isinstance(response.json(), list) else response.json()
+            result = response.json()
+            return result[0] if isinstance(result, list) and len(result) > 0 else result
     except Exception as e:
         print(f"[DB] Error creating user: {e}")
     return None
+
+def update_user_v1(user_id: str, data: Dict) -> bool:
+    """Update user in users table"""
+    try:
+        response = requests.patch(
+            f"{URL}/rest/v1/users?id=eq.{user_id}",
+            headers=HEADERS,
+            json=data,
+            timeout=10
+        )
+        return response.status_code in [200, 201, 204]
+    except Exception as e:
+        print(f"[DB] Error updating user: {e}")
+    return False
+
+# -------------------
+# AUTHENTICATION HELPERS
+# -------------------
+def hash_password(password: str) -> str:
+    """Hash a password using SHA-256 with salt"""
+    salt = os.getenv("AUTH_SALT", "hollow_secret_salt_2024")
+    return hashlib.sha256((password + salt).encode()).hexdigest()
+
+# -------------------
+# AUTHENTICATION ENDPOINTS
+# -------------------
+@app.post("/v1/auth/signup")
+async def signup(data: Dict = Body(...)):
+    """
+    Create a new user with email and password.
+    """
+    email = data.get("email")
+    password = data.get("password")
+    
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="Email and password are required")
+        
+    # Check if user already exists
+    existing_user = get_user_by_email(email)
+    if existing_user:
+        raise HTTPException(status_code=400, detail="User with this email already exists")
+        
+    # Create user
+    hashed = hash_password(password)
+    try:
+        payload = {
+            "email": email,
+            "password_hash": hashed,
+            "subscription_status": "free",
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        # Inject directly via requests
+        response = requests.post(
+            f"{URL}/rest/v1/users",
+            headers={**HEADERS, "Prefer": "return=representation"},
+            json=payload,
+            timeout=10
+        )
+        
+        if response.status_code in [200, 201]:
+            user = response.json()[0] if isinstance(response.json(), list) else response.json()
+            return {
+                "success": True,
+                "user": {
+                    "id": user["id"],
+                    "email": user["email"],
+                    "isPremium": user.get("subscription_status") == "active"
+                }
+            }
+        else:
+            print(f"[AUTH] Signup failed: {response.text}")
+            raise HTTPException(status_code=500, detail="Failed to create user")
+            
+    except Exception as e:
+        print(f"[AUTH] Signup error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/v1/auth/login")
+async def login(data: Dict = Body(...)):
+    """
+    Login with email and password.
+    """
+    email = data.get("email")
+    password = data.get("password")
+    
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="Email and password are required")
+        
+    user = get_user_by_email(email)
+    if not user:
+        # Check if it was an apple_id user just in case
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+        
+    # Verify password
+    # If the user was created without a password (apple_id), password_hash might be null
+    stored_hash = user.get("password_hash")
+    if not stored_hash or stored_hash != hash_password(password):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+        
+    return {
+        "success": True,
+        "user": {
+            "id": user["id"],
+            "email": user["email"],
+            "isPremium": user.get("subscription_status") == "active",
+            "subscriptionEnd": user.get("subscription_end")
+        }
+    }
 
 def update_user(user_id: str, updates: Dict) -> bool:
     """Update user in users table"""
@@ -827,22 +937,42 @@ async def get_feed(
             if not messages: break
             
             for msg in messages:
+                # Deduplication logic
                 sig = _get_content_signature(msg)
-                if sig in seen_signatures: continue
+                if sig in seen_signatures:
+                    continue
                 
-                product = extract_product(msg, channel_map)
-                if not product: continue
-                if not product["product_data"]["price"]: continue
+                # Extraction
+                prod = extract_product(msg, channel_map)
                 
+                # PROFESSIONAL FILTERING: Skip items with no price or price is 0.0
+                if not prod:
+                    continue
+                
+                p_data = prod.get("product_data", {})
+                price_val = p_data.get("price")
+                resale_val = p_data.get("resell")
+                
+                try:
+                    p_num = float(str(price_val or 0).replace(',', ''))
+                    r_num = float(str(resale_val or 0).replace(',', ''))
+                    if p_num == 0 and r_num == 0:
+                        # Skip items with no price info
+                        continue
+                except (ValueError, TypeError):
+                    # If we can't parse the price, skip it if it's completely missing
+                    if not price_val and not resale_val:
+                        continue
+
                 # Search Filter (In-memory verification)
                 if search and search.strip():
                     search_keywords = [k.lower().strip() for k in search.split() if k.strip()]
                     
                     # Target fields for search
-                    title_low = product["product_data"]["title"].lower()
-                    desc_low = product["product_data"]["description"].lower()
-                    cat_low = product["category_name"].lower()
-                    ret_low = (product["product_data"].get("retailer") or "").lower()
+                    title_low = prod["product_data"]["title"].lower()
+                    desc_low = prod["product_data"]["description"].lower()
+                    cat_low = prod["category_name"].lower()
+                    ret_low = (prod.get("product_data", {}).get("retailer") or "").lower()
                     
                     # Match if ANY keyword appears in ANY field
                     match_found = False
@@ -855,11 +985,11 @@ async def get_feed(
 
                 # Double check region/cat filters in memory (Post-extraction)
                 if region and region.strip().upper() != "ALL":
-                    if product["region"].strip() != region.strip(): continue
+                    if prod["region"].strip() != region.strip(): continue
                 if category and category.strip().upper() != "ALL":
-                    if product["category_name"].upper().strip() != category.upper().strip(): continue
+                    if prod["category_name"].upper().strip() != category.upper().strip(): continue
                 
-                all_products.append(product)
+                all_products.append(prod)
                 seen_signatures.add(sig)
                 if len(all_products) >= limit: break
                 

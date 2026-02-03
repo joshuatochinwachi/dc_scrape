@@ -1,25 +1,41 @@
 import React, { useContext } from 'react';
-import { StyleSheet, View, Text, FlatList, TouchableOpacity, Image } from 'react-native';
+import { StyleSheet, View, Text, FlatList, Image, TouchableOpacity } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { SavedContext } from '../context/SavedContext';
+import { UserContext } from '../context/UserContext';
 import Constants from '../Constants';
 
 const SavedScreen = ({ navigation }) => {
     const { savedProducts } = useContext(SavedContext);
+    const { isDarkMode } = useContext(UserContext);
     const brand = Constants.BRAND;
+
+    const colors = isDarkMode ? {
+        bg: brand.DARK_BG,
+        card: '#161618',
+        text: '#FFFFFF',
+        textSecondary: '#8E8E93',
+        border: 'rgba(255,255,255,0.08)',
+    } : {
+        bg: '#F8F9FE',
+        card: '#FFFFFF',
+        text: '#1C1C1E',
+        textSecondary: '#636366',
+        border: 'rgba(0,0,0,0.05)',
+    };
 
     const renderItem = ({ item }) => {
         const data = item.product_data || {};
         return (
             <TouchableOpacity
-                style={styles.card}
+                style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}
                 onPress={() => navigation.navigate('ProductDetail', { product: item })}
             >
-                <Image source={{ uri: data.image || 'https://via.placeholder.com/150' }} style={styles.image} />
+                <Image source={{ uri: data.thumbnail || 'https://via.placeholder.com/150' }} style={styles.image} />
                 <View style={styles.cardContent}>
-                    <Text style={styles.title} numberOfLines={2}>{data.title}</Text>
+                    <Text style={[styles.title, { color: colors.text }]} numberOfLines={2}>{data.title}</Text>
                     <View style={styles.priceRow}>
-                        <Text style={styles.price}>${data.price}</Text>
+                        <Text style={[styles.price, { color: colors.text }]}>${data.price}</Text>
                         {data.roi && <Text style={styles.roi}>+{data.roi}% ROI</Text>}
                     </View>
                 </View>
@@ -28,17 +44,17 @@ const SavedScreen = ({ navigation }) => {
     };
 
     return (
-        <SafeAreaView style={styles.container} edges={['top']}>
-            <View style={styles.header}>
-                <Text style={styles.headerTitle}>Saved Deals</Text>
-                <Text style={styles.stats}>{savedProducts.length} saved</Text>
+        <SafeAreaView style={[styles.container, { backgroundColor: colors.bg }]} edges={['top']}>
+            <View style={[styles.header, { borderBottomColor: colors.border, backgroundColor: colors.card }]}>
+                <Text style={[styles.headerTitle, { color: colors.text }]}>Saved Deals</Text>
+                <Text style={[styles.stats, { color: colors.textSecondary }]}>{savedProducts.length} saved</Text>
             </View>
 
             {savedProducts.length === 0 ? (
                 <View style={styles.emptyState}>
                     <Text style={styles.emptyIcon}>❤️</Text>
-                    <Text style={styles.emptyTitle}>No Saved Deals Yet</Text>
-                    <Text style={styles.emptySubtitle}>Tap the heart on any product to save it for later!</Text>
+                    <Text style={[styles.emptyTitle, { color: colors.text }]}>No Saved Deals Yet</Text>
+                    <Text style={[styles.emptySubtitle, { color: colors.textSecondary }]}>Tap the heart on any product to save it for later!</Text>
                     <TouchableOpacity
                         style={[styles.browseBtn, { borderColor: brand.BLUE }]}
                         onPress={() => navigation.navigate('Home')}
