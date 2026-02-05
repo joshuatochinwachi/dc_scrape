@@ -373,6 +373,26 @@ export const UserProvider = ({ children }) => {
     }, [showLimitModal]);
 
 
+    const linkTelegramAccount = async (code) => {
+        if (!user?.id || !code) return { success: false, message: 'Invalid request' };
+        try {
+            const response = await fetch(`${Constants.API_BASE_URL}/v1/user/telegram/link`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: user.id, code }),
+            });
+            const data = await response.json();
+            if (data.success) {
+                // Refresh status
+                checkTelegramStatus(user.id);
+            }
+            return { success: data.success, message: data.message };
+        } catch (error) {
+            console.error('[TELEGRAM] Link error:', error);
+            return { success: false, message: 'Connection error' };
+        }
+    };
+
     const checkTelegramStatus = async (specificUserId = null) => {
         const idToCheck = specificUserId || user?.id;
         if (!idToCheck) return;
@@ -456,7 +476,11 @@ export const UserProvider = ({ children }) => {
                 verifyCode,
                 forgotPassword,
                 resetPassword,
+                linkTelegramAccount,
+                checkTelegramStatus,
                 telegramLinked,
+                isPremiumTelegram,
+                premiumUntil,
 
 
                 isPremiumTelegram,

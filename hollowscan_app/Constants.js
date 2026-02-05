@@ -13,7 +13,9 @@ const Constants = {
         PURPLE: '#9333EA', // Magenta-Purple from icon
         DARK_BG: '#0A0A0B',
         LIGHT_BG: '#F8F9FE',
-    }
+    },
+
+    TELEGRAM_BOT: 'hollowscan_bot' // Replace with your bot's username
 };
 
 export default Constants;

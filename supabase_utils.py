@@ -355,6 +355,71 @@ def insert_alert(country_code: str, category_name: str, product_data: Dict, debu
         return False
 
 
+# -------------------
+# TELEGRAM ACCOUNT LINKING
+# -------------------
+def store_telegram_link_token(token: str, telegram_id: str, debug: bool = True) -> bool:
+    """
+    Store a temporary link token in Supabase.
+    """
+    url, key = get_supabase_config()
+    headers = {
+        'apikey': key,
+        'Authorization': f'Bearer {key}',
+        'Content-Type': 'application/json',
+        'Prefer': 'return=minimal'
+    }
+    
+    endpoint = f"{url}/rest/v1/telegram_link_tokens"
+    
+    # Expires in 10 minutes
+    from datetime import datetime, timedelta, timezone
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    
+    payload = {
+        "token": token,
+        "telegram_id": str(telegram_id),
+        "expires_at": expires_at
+    }
+    
+    try:
+        response = requests.post(endpoint, headers=headers, json=payload, timeout=10)
+        if response.status_code in [200, 201, 204]:
+            if debug: print(f"✅ Stored link token for {telegram_id}")
+            return True
+        else:
+            if debug: print(f"❌ Failed to store token: {response.status_code} {response.text}")
+            return False
+    except Exception as e:
+        if debug: print(f"❌ Token storage error: {e}")
+        return False
+
+def delete_user_telegram_link(telegram_id: str, debug: bool = True) -> bool:
+    """
+    Unlink a Telegram account via the bot.
+    """
+    url, key = get_supabase_config()
+    headers = {
+        'apikey': key,
+        'Authorization': f'Bearer {key}'
+    }
+    
+    # DELETE /user_telegram_links?telegram_id=eq.X
+    endpoint = f"{url}/rest/v1/user_telegram_links?telegram_id=eq.{telegram_id}"
+    
+    try:
+        response = requests.delete(endpoint, headers=headers, timeout=10)
+        if response.status_code in [200, 204]:
+            if debug: print(f"✅ Unlinked Telegram ID {telegram_id}")
+            return True
+        else:
+            if debug: print(f"❌ Link deletion failed: {response.status_code} {response.text}")
+            return False
+    except Exception as e:
+        if debug: print(f"❌ Link deletion error: {e}")
+        return False
+
+
 if __name__ == "__main__":
     print("Supabase Utils Loaded (Direct HTTP API Version)")
     

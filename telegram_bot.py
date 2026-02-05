@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 from io import BytesIO
 from PIL import Image
 import hashlib
+import uuid
 
 load_dotenv()
 
@@ -2554,10 +2555,67 @@ async def link_app_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML
         )
 
+
+# --- ACCOUNT LINKING HANDLERS ---
+
+async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /link command to connect Telegram to Mobile App"""
+    user_id = str(update.effective_user.id)
+    chat_type = update.effective_chat.type
+    
+    if chat_type != 'private':
+        await update.message.reply_text("⚠️ Please use this command in a private chat with the bot.")
+        return
+
+    # Generate secure token
+    token = str(uuid.uuid4())
+    
+    # Store in Supabase (10 min expiry)
+    success = await asyncio.to_thread(supabase_utils.store_telegram_link_token, token, user_id)
+    
+    if success:
+        # Create Deep Link Button
+        deep_link = f"hollowscan://link?code={token}"
+        
+        keyboard = [
+            [InlineKeyboardButton("🔗 Connect Account", url=deep_link)]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "**🔗 Connect to hollowScan**\n\n"
+            "Tap the button below to link your Telegram account to the mobile app.\n"
+            "This link expires in 10 minutes.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=reply_markup
+        )
+    else:
+        await update.message.reply_text("❌ Failed to generate link. Please try again later.")
+
+async def handle_unlink(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /unlink command"""
+    user_id = str(update.effective_user.id)
+    
+    # Delete link from Supabase
+    success = await asyncio.to_thread(supabase_utils.delete_user_telegram_link, user_id)
+    
+    if success:
+        await update.message.reply_text("✅ Your Telegram account has been unlinked from hollowScan.")
+    else:
+        await update.message.reply_text("❌ Failed to unlink or account was not linked.")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Welcome message with main menu"""
     user_id = str(update.effective_user.id)
     username = update.effective_user.username or update.effective_user.first_name
+    
+    # Check for deep link parameter (from app)
+    if context.args and len(context.args) > 0:
+        param = context.args[0]
+        if param == "link_account":
+            # Auto-trigger linking flow
+            await handle_link(update, context)
+            return
     
     # Track as potential user if not subscribed
     sm.track_potential_user(user_id, username)
@@ -2568,11 +2626,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 <i>Hello {username}!</i> Get instant product alerts with all the data you need.
 
 🎯 <b>Features:</b>
-• ⚡️ Real-time notifications
-• 🖼️ Product images
-• 🔗 Direct action links
-• 📊 Full stock & price data
-• ⏸️ Pause/Resume anytime
+• Real-time deal notifications
+• Custom category preferences  
+• Premium tier for advanced features
+
+Use /settings to customize your alerts or /help for all commands.
+"""
 
 📊 <b>Status:</b>
 """
@@ -3922,7 +3981,8 @@ def run_bot():
         app.add_handler(unpin_handler)
 
         app.add_handler(CommandHandler("start", start))
-        app.add_handler(CommandHandler("link", link_app_account))
+        app.add_handler(CommandHandler("link", handle_link))
+        app.add_handler(CommandHandler("unlink", handle_unlink))
         app.add_handler(CommandHandler("gen", gen_code))
         app.add_handler(CommandHandler("add_admin", add_bot_admin))
         app.add_handler(CommandHandler("remove_admin", remove_bot_admin))

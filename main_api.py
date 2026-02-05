@@ -452,30 +452,177 @@ async def change_password(data: Dict = Body(...)):
     else:
         raise HTTPException(status_code=500, detail="Failed to update password")
 
+# Sends push notification via Expo Push API
 async def send_expo_push_notification(tokens: List[str], title: str, body: str, data: Dict = None):
-    """Sends push notification via Expo Push API"""
     if not tokens: return
+    
+    message = {
+        "to": tokens,
+        "sound": "default",
+        "title": title,
+        "body": body,
+        "data": data or {},
+        "badge": 1
+    }
+
     try:
-        payload = []
-        for token in tokens:
-            payload.append({
-                "to": token,
-                "title": title,
-                "body": body,
-                "data": data or {},
-                "sound": "default",
-                "priority": "high"
-            })
+        response = await http_client.post(
+            "https://exp.host/--/api/v2/push/send",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            json=message
+        )
+        if response.status_code != 200:
+            print(f"[PUSH] Expo error: {response.text}")
+    except Exception as e:
+        print(f"[PUSH] Error sending push: {e}")
+
+
+# --- BOT USERS CACHE ---
+bot_users_cache = {
+    "data": {},
+    "last_fetched": 0
+}
+
+async def get_bot_users_data():
+    """Fetch and cache bot users data from Supabase Storage"""
+    global bot_users_cache
+    now = time.time()
+    # Cache for 60 seconds
+    if now - bot_users_cache["last_fetched"] < 60 and bot_users_cache["data"]:
+        return bot_users_cache["data"]
+        
+    try:
+        url, key = get_supabase_config()
+        # Direct download from storage
+        # Bucket: monitor-data, Path: discord_josh/bot_users.json
+        storage_url = f"{url}/storage/v1/object/public/monitor-data/discord_josh/bot_users.json"
         
         async with httpx.AsyncClient() as client:
-            response = await client.post(
-                "https://exp.host/--/api/v2/push/send",
-                json=payload,
-                headers={"Content-Type": "application/json"}
-            )
-            print(f"[PUSH] Expo response: {response.status_code}")
+            response = await client.get(storage_url)
+            if response.status_code == 200:
+                data = response.json()
+                bot_users_cache["data"] = data
+                bot_users_cache["last_fetched"] = now
+                return data
     except Exception as e:
-        print(f"[PUSH] Error sending notification: {e}")
+        print(f"[BOT] Error fetching bot users: {e}")
+        
+    return bot_users_cache["data"]
+
+# --- TELEGRAM LINKING ENDPOINTS ---
+
+@app.get("/v1/user/telegram/link-status")
+async def get_telegram_link_status_endpoint(user_id: str = Query(...)):
+    links = await get_telegram_links_for_user(user_id)
+    if links:
+        link = links[0]
+        telegram_id = link.get("telegram_id")
+        
+        # Check Premium Status from Bot Data
+        bot_users = await get_bot_users_data()
+        user_data = bot_users.get(str(telegram_id), {})
+        expiry_str = user_data.get("expiry")
+        
+        is_premium = False
+        premium_until = None
+        
+        if expiry_str:
+            try:
+                # Simple ISO parse
+                expiry_dt = datetime.fromisoformat(expiry_str.replace('Z', '+00:00'))
+                # If naive, assume UTC
+                if expiry_dt.tzinfo is None:
+                    expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
+                    
+                now_dt = datetime.now(timezone.utc)
+                if expiry_dt > now_dt:
+                    is_premium = True
+                    premium_until = expiry_str
+            except Exception as e:
+                # Fallback for complex date strings if needed
+                print(f"[DATE] Parse error: {e}")
+                pass
+
+        return {
+            "success": True, 
+            "linked": True, 
+            "telegram_username": link.get("telegram_username"),
+            "telegram_id": telegram_id,
+            "is_premium": is_premium,
+            "premium_until": premium_until
+        }
+    return {"success": True, "linked": False}
+
+@app.post("/v1/user/telegram/link")
+async def link_telegram_endpoint(data: Dict = Body(...)):
+    user_id = data.get("user_id")
+    token = data.get("code") # App sends 'code' for the token string
+    
+    if not user_id or not token:
+        raise HTTPException(status_code=400, detail="Missing user_id or code")
+        
+    # 1. Verify Token
+    try:
+        # Check token and expiry
+        # Note: 'gt' operator for expiry check
+        now_iso = datetime.now(timezone.utc).isoformat()
+        response = await http_client.get(
+            f"{URL}/rest/v1/telegram_link_tokens?token=eq.{token}&expires_at=gt.{now_iso}&select=*", 
+            headers=HEADERS
+        )
+        
+        if response.status_code != 200 or not response.json():
+            return {"success": False, "message": "Invalid or expired code"}
+            
+        token_data = response.json()[0]
+        telegram_id = token_data.get("telegram_id")
+        
+        if not telegram_id:
+            return {"success": False, "message": "Invalid token data"}
+            
+        # 2. Link Account
+        # Check if already linked to another user? 
+        # For now, simplistic approach: Link to this user.
+        # Ideally we might want to check if this telegram_id is already linked to SOMEONE else.
+        
+        existing_link_check = await http_client.get(
+            f"{URL}/rest/v1/user_telegram_links?telegram_id=eq.{telegram_id}&select=user_id",
+            headers=HEADERS
+        )
+        if existing_link_check.status_code == 200 and existing_link_check.json():
+            existing_user = existing_link_check.json()[0]['user_id']
+            if existing_user != user_id:
+                 return {"success": False, "message": "Telegram account already linked to another user"}
+
+        success = await link_telegram_account(user_id, telegram_id)
+        
+        if success:
+            # 3. Consume Token (Delete it)
+            await http_client.delete(f"{URL}/rest/v1/telegram_link_tokens?token=eq.{token}", headers=HEADERS)
+            return {"success": True, "message": "Account linked successfully"}
+        else:
+            return {"success": False, "message": "Failed to create link"}
+            
+    except Exception as e:
+        print(f"[LINK] Error linking: {e}")
+        return {"success": False, "message": str(e)}
+
+@app.post("/v1/user/telegram/unlink")
+async def unlink_telegram_endpoint(data: Dict = Body(...)):
+    user_id = data.get("user_id")
+    if not user_id:
+         raise HTTPException(status_code=400, detail="Missing user_id")
+         
+    try:
+        response = await http_client.delete(f"{URL}/rest/v1/user_telegram_links?user_id=eq.{user_id}", headers=HEADERS)
+        if response.status_code in [200, 204]:
+             return {"success": True, "message": "Unlinked successfully"}
+        return {"success": False, "message": "Failed to unlink"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
 
 async def background_notification_worker():
     """Background task to poll for new products and notify users"""

@@ -1,6 +1,6 @@
 import React from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { Text, View, ActivityIndicator } from 'react-native';
+import { Text, View, ActivityIndicator, Alert } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -91,7 +91,58 @@ function TabNavigator() {
 }
 
 const NavigationRoot = ({ showSplash, setShowSplash, linking }) => {
-  const { isDarkMode, user, isLoading } = React.useContext(UserContext);
+  const { isDarkMode, user, isLoading, linkTelegramAccount } = React.useContext(UserContext);
+
+  // Handle Deep Linking for Account Link
+  React.useEffect(() => {
+    const handleDeepLink = async (event) => {
+      const url = event.url;
+      if (!url) return;
+
+      // Check for link pattern: hollowscan://link?code=XYZ
+      if (url.includes('/link') && url.includes('code=')) {
+        // Extract code
+        try {
+          const regex = /[?&]code=([^&#]+)/;
+          const match = url.match(regex);
+
+          if (match && match[1]) {
+            const code = match[1];
+
+            // Show loading indicator or toast? Alert is simplest for now.
+            // Or better: Let UserContext handle it, but we need UI feedback.
+            // Since we are outside a screen, Alert is good.
+
+            if (!user) {
+              Alert.alert('Login Required', 'Please log in to link your Telegram account.');
+              return;
+            }
+
+            const result = await linkTelegramAccount(code);
+
+            if (result.success) {
+              Alert.alert('Success', 'Telegram account linked successfully! 🎉');
+            } else {
+              Alert.alert('Error', result.message || 'Failed to link account.');
+            }
+          }
+        } catch (e) {
+          console.error('Deep link error:', e);
+        }
+      }
+    };
+
+    const sub = Linking.addEventListener('url', handleDeepLink);
+
+    // Check initial URL
+    Linking.getInitialURL().then(url => {
+      if (url) handleDeepLink({ url });
+    });
+
+    return () => {
+      if (sub && sub.remove) sub.remove();
+    };
+  }, [user]); // Re-bind if user changes (so we have up-to-date user object)
 
   if (isLoading) {
     return (

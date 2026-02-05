@@ -54,34 +54,19 @@ const ProfileScreen = ({ navigation }) => {
     }, 0).toFixed(0);
 
     // Handlers
-    const handleGenerateLinkKey = async () => {
-        if (!userId || userId === 'guest-user') {
-            Alert.alert('Error', 'User ID not found. Please restart the app.');
-            return;
-        }
 
-        setIsGeneratingKey(true);
-        try {
-            console.log('[TELEGRAM] Generating link key for user:', userId);
+    const handleTelegramLinkPress = () => {
+        if (telegramLinked) {
+            setTelegramModalVisible(true);
+        } else {
+            // Open Telegram bot with deep link parameter
+            const botUsername = Constants.TELEGRAM_BOT;
+            const telegramUrl = `https://t.me/${botUsername}?start=link_account`;
 
-            const response = await fetch(
-                `${Constants.API_BASE_URL}/v1/user/telegram/generate-key?user_id=${userId}`,
-                { method: 'POST', headers: { 'Content-Type': 'application/json' } }
-            );
-
-            const data = await response.json();
-            if (data.success) {
-                setTelegramLinkKey(data.link_key);
-            } else {
-                Alert.alert('Error', data.detail || 'Failed to generate link key');
-                setTelegramModalVisible(false);
-            }
-        } catch (error) {
-            console.error('[TELEGRAM] Error:', error);
-            Alert.alert('Error', `Failed to generate link key: ${error.message}`);
-            setTelegramModalVisible(false);
-        } finally {
-            setIsGeneratingKey(false);
+            Linking.openURL(telegramUrl).catch(err => {
+                Alert.alert('Error', 'Could not open Telegram. Please make sure Telegram is installed.');
+                console.error('Failed to open Telegram:', err);
+            });
         }
     };
 
@@ -266,7 +251,7 @@ const ProfileScreen = ({ navigation }) => {
                                 ? `👑 Premium until ${new Date(premiumUntil).toLocaleDateString()}`
                                 : (telegramLinked ? 'Receiving notifications' : 'Connect for alerts')
                         }
-                        onPress={() => setTelegramModalVisible(true)}
+                        onPress={handleTelegramLinkPress}
                     />
 
                 </View>
@@ -333,77 +318,12 @@ const ProfileScreen = ({ navigation }) => {
                             </View>
 
                             {!telegramLinked ? (
-                                <>
-                                    {!telegramLinkKey ? (
-                                        // Step 1: Start
-                                        <>
-                                            <Text style={styles.modalDescription}>
-                                                Get instant notifications for new deals
-                                            </Text>
-
-                                            <TouchableOpacity
-                                                style={[styles.primaryBtn, isGeneratingKey && { opacity: 0.6 }]}
-                                                onPress={handleGenerateLinkKey}
-                                                disabled={isGeneratingKey}
-                                            >
-                                                {isGeneratingKey ? (
-                                                    <ActivityIndicator color="#fff" size="small" />
-                                                ) : (
-                                                    <Text style={styles.primaryBtnText}>Generate Link Key</Text>
-                                                )}
-                                            </TouchableOpacity>
-                                        </>
-                                    ) : (
-                                        // Step 2: Show Key & Bot Link
-                                        <>
-                                            <View style={styles.keyBox}>
-                                                <Text style={styles.keyLabel}>Your Code:</Text>
-                                                <Text style={styles.keyText}>{telegramLinkKey}</Text>
-                                                <TouchableOpacity
-                                                    style={styles.copyBtn}
-                                                    onPress={() => {
-                                                        Clipboard.setString(telegramLinkKey);
-                                                        Alert.alert('✓ Copied', 'Code copied!');
-                                                    }}
-                                                >
-                                                    <Text style={styles.copyBtnText}>Copy Code</Text>
-                                                </TouchableOpacity>
-                                            </View>
-
-                                            <TouchableOpacity
-                                                style={styles.botLinkBtn}
-                                                onPress={openTelegramBot}
-                                            >
-                                                <Text style={styles.botLinkText}>🤖 Open Bot</Text>
-                                            </TouchableOpacity>
-
-                                            <Text style={{ textAlign: 'center', color: '#6B7280', fontSize: 12, marginBottom: 20 }}>
-                                                Send: <Text style={{ fontWeight: '700' }}>/link {telegramLinkKey}</Text>
-                                            </Text>
-
-                                            <View style={styles.modalButtonsContainer}>
-                                                <TouchableOpacity
-                                                    style={styles.cancelBtn}
-                                                    onPress={() => setTelegramLinkKey(null)}
-                                                    disabled={isCheckingStatus}
-                                                >
-                                                    <Text style={styles.cancelBtnText}>Back</Text>
-                                                </TouchableOpacity>
-                                                <TouchableOpacity
-                                                    style={styles.linkBtn}
-                                                    onPress={handleCheckLinkStatus}
-                                                    disabled={isCheckingStatus}
-                                                >
-                                                    {isCheckingStatus ? (
-                                                        <ActivityIndicator color="#fff" size="small" />
-                                                    ) : (
-                                                        <Text style={styles.linkBtnText}>Verify</Text>
-                                                    )}
-                                                </TouchableOpacity>
-                                            </View>
-                                        </>
-                                    )}
-                                </>
+                                <View style={{ alignItems: 'center', paddingVertical: 20 }}>
+                                    <Text style={styles.modalDescription}>
+                                        Tap "Telegram Bot" in Profile to connect.{'\n'}
+                                        You'll be taken directly to the bot!
+                                    </Text>
+                                </View>
                             ) : (
                                 <>
                                     <View style={styles.successContainer}>
@@ -413,7 +333,6 @@ const ProfileScreen = ({ navigation }) => {
                                             <Text style={{ fontSize: 12, color: '#D97706', marginTop: 5 }}>👑 Premium Status Synced</Text>
                                         )}
                                     </View>
-
 
                                     <View style={styles.benefitsContainer}>
                                         <Text style={styles.benefitTitle}>Getting notifications for:</Text>
@@ -438,13 +357,13 @@ const ProfileScreen = ({ navigation }) => {
                                     </View>
                                 </>
                             )}
-                        </View>
-                    </View>
-                </BlurView>
-            </Modal>
+                        </View >
+                    </View >
+                </BlurView >
+            </Modal >
 
             {/* COUNTRY SELECTOR MODAL */}
-            <Modal
+            < Modal
                 visible={countryModalVisible}
                 transparent={true}
                 animationType="fade"
@@ -482,8 +401,8 @@ const ProfileScreen = ({ navigation }) => {
                         </View>
                     </View>
                 </BlurView>
-            </Modal>
-        </SafeAreaView>
+            </Modal >
+        </SafeAreaView >
     );
 };
 
