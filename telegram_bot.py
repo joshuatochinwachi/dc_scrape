@@ -2491,7 +2491,8 @@ async def link_app_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # 7. Call the backend endpoint to complete the linking
         import requests
-        api_url = "http://localhost:8000/v1/user/telegram/link"
+        api_base = os.getenv("API_BASE_URL", "https://web-production-18cf1.up.railway.app")
+        api_url = f"{api_base}/v1/user/telegram/link"
         
         try:
             response = requests.post(
@@ -2575,7 +2576,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if success:
         # Use a redirect URL (Since Telegram buttons don't support hollowscan://)
-        api_base = os.getenv("API_BASE_URL", "http://localhost:8000")
+        api_base = os.getenv("API_BASE_URL", "https://web-production-18cf1.up.railway.app")
         redirect_url = f"{api_base}/v1/user/telegram/redirect?code={token}"
         
         keyboard = [
@@ -2611,10 +2612,47 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = update.effective_user.username or update.effective_user.first_name
     
     # Check for deep link parameter (from app)
+    # Format: https://t.me/Bot?start=link_<USER_ID>
     if context.args and len(context.args) > 0:
         param = context.args[0]
-        if param == "link_account":
-            # Auto-trigger linking flow
+        
+        # New Direct Link Flow
+        if param.startswith("link_"):
+            app_user_id = param.replace("link_", "")
+            await update.message.reply_text("🔄 Linking your account...")
+            
+            # Prepare premium info if applicable
+            premium_info = None
+            if sm.is_active(user_id):
+                user_data = sm.users.get(str(user_id), {})
+                premium_info = {
+                    "status": "active",
+                    "end": user_data.get('expiry'),  # Raw ISO timestamp
+                    "source": "telegram"
+                }
+
+            # Call robust linking util
+            result = await asyncio.to_thread(
+                supabase_utils.link_app_user_to_telegram, 
+                app_user_id, 
+                user_id, 
+                f"@{username}" if username else None,
+                premium_info
+            )
+            
+            if result.get("success"):
+                await update.message.reply_text(
+                    "✅ **Successfully Linked!**\n\n"
+                    "Your Telegram account is now connected to the HollowScan App.\n"
+                    "You can return to the app now.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                await update.message.reply_text(f"❌ Linking Failed: {result.get('message')}")
+            return
+
+        elif param == "link_account":
+             # Legacy flow - deprecated but kept for safety
             await handle_link(update, context)
             return
     
@@ -3936,108 +3974,101 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # 5. RUN BOT FUNCTION
 def run_bot():
-    """Run bot with professional alert system"""
-    try:
-        if not TELEGRAM_TOKEN:
-            logger.error("❌ TELEGRAM_TOKEN not set!")
-            return
-        
-        logger.info("\n" + "=" * 80)
-        logger.info("🚀 TELEGRAM BOT INITIALIZATION")
-        logger.info("=" * 80)
-        logger.info(f"   Token: {TELEGRAM_TOKEN[:15]}...***{TELEGRAM_TOKEN[-5:]}")
-        logger.info(f"   Admin ID: {ADMIN_USER_ID}")
-        logger.info(f"   Poll Interval: {POLL_INTERVAL} seconds")
-        logger.info(f"   Max Runtime: {MAX_JOB_RUNTIME} seconds")
-        
-        app = Application.builder().token(TELEGRAM_TOKEN).build()
-        
-        # Command Handlers
-        # Broadcast Handler
-        broadcast_handler = ConversationHandler(
-            entry_points=[CommandHandler("broadcast", broadcast_start)],
-            states={
-                BROADCAST_TARGET: [CallbackQueryHandler(broadcast_target)],
-                BROADCAST_MESSAGE: [MessageHandler(filters.TEXT | filters.PHOTO, broadcast_message_input)],
-                BROADCAST_PIN: [CallbackQueryHandler(broadcast_pin_choice)],
-                BROADCAST_CONFIRM: [CallbackQueryHandler(broadcast_confirm)],
-            },
-            fallbacks=[
-                CommandHandler("cancel", broadcast_cancel),
-                CallbackQueryHandler(broadcast_cancel, pattern="^cancel$")
-            ]
-        )
-        app.add_handler(broadcast_handler)
-
-        # Unpin Handler
-        unpin_handler = ConversationHandler(
-            entry_points=[CommandHandler("unpin_all", unpin_start)],
-            states={
-                UNPIN_TARGET: [CallbackQueryHandler(unpin_target_handler)],
-                UNPIN_CONFIRM: [CallbackQueryHandler(unpin_execute)]
-            },
-            fallbacks=[CallbackQueryHandler(broadcast_cancel, pattern="^cancel$")] # Reuse cancel
-        )
-        app.add_handler(unpin_handler)
-
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CommandHandler("link", handle_link))
-        app.add_handler(CommandHandler("unlink", handle_unlink))
-        app.add_handler(CommandHandler("gen", gen_code))
-        app.add_handler(CommandHandler("add_admin", add_bot_admin))
-        app.add_handler(CommandHandler("remove_admin", remove_bot_admin))
-        app.add_handler(CommandHandler("test", test_alerts))
-        app.add_handler(CommandHandler("add_channel", add_channel_cmd))
-        app.add_handler(CommandHandler("remove_channel", remove_channel_cmd))
-        app.add_handler(CommandHandler("channels", list_channels_cmd))
-        app.add_handler(CommandHandler("subscribe", subscribe))
-        app.add_handler(CommandHandler("billing", billing_portal))
-        app.add_handler(CommandHandler("help", show_help))  # Help command
-        app.add_handler(CallbackQueryHandler(button_handler))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        
-        # Global error handler
-        app.add_error_handler(error_handler)
-        
-        if app.job_queue:
-            logger.info("   Adding broadcast job with overlap protection...")
-            app.job_queue.run_repeating(
-                broadcast_job, 
-                interval=POLL_INTERVAL, 
-                first=10
-            )
-
-            # Register expiry reminders (Check daily)
-            logger.info("   Adding bi-weekly expiry reminder job...")
-            app.job_queue.run_repeating(
-                expiry_reminder_job,
-                interval=86400, # Once a day
-                first=30        # Start after 30 seconds
-            )
-
-            # Register potential user reminders (Check daily)
-            logger.info("   Adding bi-weekly potential user reminder job...")
-            app.job_queue.run_repeating(
-                potential_user_reminder_job,
-                interval=86400, # Once a day
-                first=60        # Start after 60 seconds
-            )
-            # Register menu setup (One-time, 5s after startup)
-            app.job_queue.run_once(setup_bot_commands, when=5)
+    """Run bot with professional alert system (Resilient version)"""
+    import nest_asyncio
+    nest_asyncio.apply()
+    
+    # Create a fresh event loop for this thread to avoid loop conflicts
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    retry_count = 0
+    max_retries = 3
+    
+    while retry_count < max_retries:
+        try:
+            if not TELEGRAM_TOKEN:
+                logger.error("❌ TELEGRAM_TOKEN not set!")
+                return
             
-            logger.info(f"   ✅ Job queue running (poll every {POLL_INTERVAL}s)")
-        
-        # Show active users count on startup
-        active_count = len(sm.get_active_users())
-        total_count = len(sm.users)
-        logger.info(f"   📊 Users: {total_count} total, {active_count} active")
-        logger.info("=" * 80 + "\n")
-        
-        logger.info("📡 Starting polling loop...")
-        app.run_polling(allowed_updates=Update.ALL_TYPES, stop_signals=[])
-        
-    except KeyboardInterrupt:
-        logger.info("⚠️  Bot interrupted by user")
-    except Exception as e:
-        logger.error(f"❌ CRITICAL BOT ERROR: {e}")
-        logger.error(traceback.format_exc())
+            logger.info("\n" + "=" * 80)
+            logger.info(f"🚀 TELEGRAM BOT INITIALIZATION (Attempt {retry_count + 1})")
+            logger.info("=" * 80)
+            logger.info(f"   Token: {TELEGRAM_TOKEN[:15]}...***{TELEGRAM_TOKEN[-5:]}")
+            logger.info(f"   Admin ID: {ADMIN_USER_ID}")
+            
+            app = Application.builder().token(TELEGRAM_TOKEN).build()
+            
+            # --- Handler Registration ---
+            # Broadcast Handler
+            broadcast_handler = ConversationHandler(
+                entry_points=[CommandHandler("broadcast", broadcast_start)],
+                states={
+                    BROADCAST_TARGET: [CallbackQueryHandler(broadcast_target)],
+                    BROADCAST_MESSAGE: [MessageHandler(filters.TEXT | filters.PHOTO, broadcast_message_input)],
+                    BROADCAST_PIN: [CallbackQueryHandler(broadcast_pin_choice)],
+                    BROADCAST_CONFIRM: [CallbackQueryHandler(broadcast_confirm)],
+                },
+                fallbacks=[
+                    CommandHandler("cancel", broadcast_cancel),
+                    CallbackQueryHandler(broadcast_cancel, pattern="^cancel$")
+                ]
+            )
+            app.add_handler(broadcast_handler)
+
+            # Unpin Handler
+            unpin_handler = ConversationHandler(
+                entry_points=[CommandHandler("unpin_all", unpin_start)],
+                states={
+                    UNPIN_TARGET: [CallbackQueryHandler(unpin_target_handler)],
+                    UNPIN_CONFIRM: [CallbackQueryHandler(unpin_execute)]
+                },
+                fallbacks=[CallbackQueryHandler(broadcast_cancel, pattern="^cancel$")]
+            )
+            app.add_handler(unpin_handler)
+
+            app.add_handler(CommandHandler("start", start))
+            app.add_handler(CommandHandler("link", handle_link))
+            app.add_handler(CommandHandler("unlink", handle_unlink))
+            app.add_handler(CommandHandler("gen", gen_code))
+            app.add_handler(CommandHandler("add_admin", add_bot_admin))
+            app.add_handler(CommandHandler("remove_admin", remove_bot_admin))
+            app.add_handler(CommandHandler("test", test_alerts))
+            app.add_handler(CommandHandler("add_channel", add_channel_cmd))
+            app.add_handler(CommandHandler("remove_channel", remove_channel_cmd))
+            app.add_handler(CommandHandler("channels", list_channels_cmd))
+            app.add_handler(CommandHandler("subscribe", subscribe))
+            app.add_handler(CommandHandler("billing", billing_portal))
+            app.add_handler(CommandHandler("help", show_help))
+            app.add_handler(CallbackQueryHandler(button_handler))
+            app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+            
+            app.add_error_handler(error_handler)
+            
+            if app.job_queue:
+                app.job_queue.run_repeating(broadcast_job, interval=POLL_INTERVAL, first=10)
+                app.job_queue.run_repeating(expiry_reminder_job, interval=86400, first=30)
+                app.job_queue.run_repeating(potential_user_reminder_job, interval=86400, first=60)
+                app.job_queue.run_once(setup_bot_commands, when=5)
+            
+            active_count = len(sm.get_active_users())
+            logger.info(f"   📊 Users: {len(sm.users)} total, {active_count} active")
+            logger.info("📡 Starting polling loop...")
+            
+            # Explicitly set stop_signals=[] for threaded operation
+            # stop_signals=[] prevents run_polling from trying to listen to OS signals (impossible in thread)
+            app.run_polling(allowed_updates=Update.ALL_TYPES, stop_signals=[])
+            break # Exit loop if run_polling returns normally (e.g. stop requested)
+
+        except Exception as e:
+            retry_count += 1
+            logger.error(f"❌ BOT CRASH (Attempt {retry_count}): {e}")
+            if "ExtBot is not properly initialized" in str(e) or "NetworkError" in str(e):
+                logger.warning("   💡 Potentially transient initialization/network failure. Retrying in 10s...")
+                time.sleep(10)
+            else:
+                logger.error(traceback.format_exc())
+                break
+    
+    if retry_count >= max_retries:
+        logger.error("🛑 Bot failed to start after maximum retries.")

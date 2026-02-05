@@ -49,7 +49,7 @@ const HomeScreen = () => {
 
     // CONFIG
     const LIMIT = 10;
-    const USER_ID = '8923304e-657e-4e7e-800a-94e7248ecf7f';
+    const USER_ID = user?.id || 'guest-user';
 
     // REGIONS - Compact Format
     const regions = [
@@ -74,7 +74,7 @@ const HomeScreen = () => {
     const [isLoadingMore, setIsLoadingMore] = useState(false);
     const [offset, setOffset] = useState(0);
     const [hasMore, setHasMore] = useState(true);
-    const [isPremium, setIsPremium] = useState(false);
+    // REMOVED Local isPremium state - using context userIsPremium Instead
     const [totalAvailable, setTotalAvailable] = useState(0);
 
     const [countdown, setCountdown] = useState(''); // Keep local if used for UI display in feed, but modal uses context
@@ -185,7 +185,7 @@ const HomeScreen = () => {
                 const existingIds = new Set(prev.map(a => a.id));
                 const uniqueNew = newProducts.filter(p => !existingIds.has(p.id));
                 const combined = [...uniqueNew, ...prev];
-                if (!isPremium) {
+                if (!userIsPremium) {
                     return combined.slice(0, 4);
                 }
                 return combined;
@@ -230,7 +230,7 @@ const HomeScreen = () => {
             const response = await fetch(`${Constants.API_BASE_URL}/v1/user/status?user_id=${USER_ID}`);
             const data = await response.json();
             setQuota({ used: data.views_used, limit: data.views_limit });
-            if (data.is_premium !== undefined) setIsPremium(data.is_premium);
+            // Local state removed, syncing from context is handled by checkTelegramStatus and refreshUserStatus
         } catch (e) { }
     };
 
@@ -251,7 +251,9 @@ const HomeScreen = () => {
             const data = Array.isArray(result) ? result : (result.products || []);
             const nextOffset = result.next_offset !== undefined ? result.next_offset : (currentOffset + LIMIT);
 
-            if (result.is_premium !== undefined) setIsPremium(result.is_premium);
+            if (result.is_premium !== undefined) {
+                // No local state update needed here
+            }
             if (result.total_count !== undefined) setTotalAvailable(result.total_count);
 
             if (data.length >= 0) {
@@ -279,7 +281,7 @@ const HomeScreen = () => {
 
     const handleLoadMore = () => {
         if (!hasMore || isLoadingMore || isLoading || alerts.length === 0) return;
-        if (!isPremium && alerts.length >= 4) return;
+        if (!userIsPremium && alerts.length >= 4) return;
 
         setIsLoadingMore(true);
         fetchAlerts(offset, false, searchQuery).then(() => {
@@ -641,7 +643,7 @@ const HomeScreen = () => {
                     onEndReachedThreshold={0.5}
                     ListFooterComponent={() => {
                         if (isLoadingMore) return <ActivityIndicator color={brand.BLUE} style={{ marginVertical: 20 }} />;
-                        if (!isPremium && alerts.length >= 4) {
+                        if (!userIsPremium && alerts.length >= 4) {
                             // Compact Paywall for Horizontal Layout
                             return (
                                 <View style={[styles.paywallCompact, { backgroundColor: colors.card, borderColor: colors.border }]}>

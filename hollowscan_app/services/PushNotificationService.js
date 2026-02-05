@@ -1,5 +1,6 @@
 import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
+import { Platform } from 'react-native';
 import Constants from '../Constants';
 
 /**
@@ -27,6 +28,15 @@ export const requestNotificationPermissions = async () => {
             return false;
         }
 
+        if (Platform.OS === 'android') {
+            await Notifications.setNotificationChannelAsync('default', {
+                name: 'default',
+                importance: Notifications.AndroidImportance.MAX,
+                vibrationPattern: [0, 250, 250, 250],
+                lightColor: '#FF231F7C',
+            });
+        }
+
         console.log('[NOTIFICATIONS] Permission granted');
         return true;
     } catch (error) {
@@ -39,7 +49,6 @@ export const setupNotificationHandler = () => {
     // Set how notifications should appear when app is in foreground
     Notifications.setNotificationHandler({
         handleNotification: async () => ({
-            shouldShowAlert: true,
             shouldShowBanner: true,
             shouldShowList: true,
             shouldPlaySound: true,

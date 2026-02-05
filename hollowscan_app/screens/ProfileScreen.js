@@ -10,7 +10,7 @@ import Constants from '../Constants';
 
 const ProfileScreen = ({ navigation }) => {
     const { savedProducts } = useContext(SavedContext);
-    const { user, isDarkMode, toggleTheme, logout, telegramLinked, isPremiumTelegram, premiumUntil, checkTelegramStatus, selectedRegion, updateRegion } = useContext(UserContext);
+    const { user, isDarkMode, toggleTheme, logout, telegramLinked, isPremiumTelegram, premiumUntil, checkTelegramStatus, unlinkTelegramAccount, selectedRegion, updateRegion } = useContext(UserContext);
     const brand = Constants.BRAND;
 
     const colors = isDarkMode ? {
@@ -59,14 +59,23 @@ const ProfileScreen = ({ navigation }) => {
         if (telegramLinked) {
             setTelegramModalVisible(true);
         } else {
-            // Open Telegram bot with deep link parameter
-            const botUsername = Constants.TELEGRAM_BOT;
-            const telegramUrl = `https://t.me/${botUsername}?start=link_account`;
+            // New Direct Link Flow with user ID
+            openTelegramBot();
 
-            Linking.openURL(telegramUrl).catch(err => {
-                Alert.alert('Error', 'Could not open Telegram. Please make sure Telegram is installed.');
-                console.error('Failed to open Telegram:', err);
-            });
+            // Show alert that they should complete the linking in Telegram
+            Alert.alert(
+                '📱 Opening Telegram',
+                'Please tap "Start" in the bot to complete the linking process. The app will auto-refresh your status.',
+                [{ text: 'OK' }]
+            );
+
+            // Auto-check status after a delay
+            setTimeout(async () => {
+                const result = await checkTelegramStatus();
+                if (result && result.linked) {
+                    Alert.alert('✅ Success', 'Telegram account linked successfully!');
+                }
+            }, 5000);
         }
     };
 
@@ -99,9 +108,13 @@ const ProfileScreen = ({ navigation }) => {
                 {
                     text: 'Unlink',
                     style: 'destructive',
-                    onPress: () => {
-                        setTelegramLinked(false);
-                        Alert.alert('Unlinked', 'Your Telegram account has been unlinked');
+                    onPress: async () => {
+                        const result = await unlinkTelegramAccount();
+                        if (result && result.success) {
+                            Alert.alert('Unlinked', 'Your Telegram account has been unlinked');
+                        } else {
+                            Alert.alert('Error', 'Failed to unlink account. Please try again.');
+                        }
                     }
                 }
             ]
@@ -109,7 +122,9 @@ const ProfileScreen = ({ navigation }) => {
     };
 
     const openTelegramBot = () => {
-        Linking.openURL('https://t.me/Hollowscan_bot').catch(() => {
+        // New Direct Link: App -> Telegram with user ID
+        const deepLink = `https://t.me/HollowScanBot?start=link_${user.id}`;
+        Linking.openURL(deepLink).catch(() => {
             Alert.alert('Error', 'Could not open Telegram. Please install Telegram first.');
         });
     };
@@ -201,16 +216,19 @@ const ProfileScreen = ({ navigation }) => {
                         <Text style={styles.planText}>👑 {(user?.isPremium || isPremiumTelegram) ? 'Premium' : 'Free'} Plan</Text>
                     </View>
 
-                    <TouchableOpacity style={styles.upgradeBtn}>
-                        <LinearGradient
-                            colors={[brand.CYAN, brand.BLUE]}
-                            start={{ x: 0, y: 0 }}
-                            end={{ x: 1, y: 1 }}
-                            style={styles.upgradeGradient}
-                        >
-                            <Text style={styles.upgradeText}>Upgrade to Premium</Text>
-                        </LinearGradient>
-                    </TouchableOpacity>
+                    {/* Only show upgrade button if not premium */}
+                    {!(user?.isPremium || isPremiumTelegram) && (
+                        <TouchableOpacity style={styles.upgradeBtn}>
+                            <LinearGradient
+                                colors={[brand.CYAN, brand.BLUE]}
+                                start={{ x: 0, y: 0 }}
+                                end={{ x: 1, y: 1 }}
+                                style={styles.upgradeGradient}
+                            >
+                                <Text style={styles.upgradeText}>Upgrade to Premium</Text>
+                            </LinearGradient>
+                        </TouchableOpacity>
+                    )}
                 </ImageBackground>
 
                 {/* NOTIFICATION & PREFERENCES */}

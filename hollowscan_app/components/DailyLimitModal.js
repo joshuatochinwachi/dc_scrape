@@ -136,11 +136,21 @@ const DailyLimitModal = () => {
                                 <TouchableOpacity
                                     style={{ backgroundColor: '#0EA5E9', padding: 16, borderRadius: 12, marginBottom: 12 }}
                                     onPress={() => {
-                                        const botUsername = Constants.TELEGRAM_BOT;
-                                        const telegramUrl = `https://t.me/${botUsername}?start=link_account`;
+                                        // New Direct Link: App -> Telegram with user ID
+                                        const telegramUrl = `https://t.me/HollowScanBot?start=link_${user.id}`;
                                         Linking.openURL(telegramUrl).catch(() => {
                                             Alert.alert('Error', 'Could not open Telegram. Please install Telegram first.');
                                         });
+
+                                        // Auto-check status after delay
+                                        setTimeout(async () => {
+                                            const result = await checkTelegramStatus();
+                                            if (result && result.linked) {
+                                                setShowTelegramFlow(false);
+                                                setShowLimitModal(false);
+                                                Alert.alert('🎉 Success!', 'Telegram account linked and premium status synced!');
+                                            }
+                                        }, 5000);
                                     }}
                                 >
                                     <Text style={{ color: '#FFF', fontWeight: '800', textAlign: 'center', fontSize: 16 }}>🚀 Open Telegram Bot</Text>

@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import asyncio
 import re
+import time
 
 import os
 import json
@@ -515,13 +516,20 @@ async def change_password(data: Dict = Body(...)):
 async def send_expo_push_notification(tokens: List[str], title: str, body: str, data: Dict = None):
     if not tokens: return
     
+    # Ensure http_client is ready
+    if not http_client:
+        print("[PUSH] Warning: http_client not initialized, skipping push.")
+        return
+
     message = {
         "to": tokens,
         "sound": "default",
         "title": title,
         "body": body,
         "data": data or {},
-        "badge": 1
+        "badge": 1,
+        "priority": "high",
+        "channelId": "default"
     }
 
     try:
@@ -536,6 +544,7 @@ async def send_expo_push_notification(tokens: List[str], title: str, body: str, 
         if response.status_code != 200:
             print(f"[PUSH] Expo error: {response.text}")
     except Exception as e:
+        # Catch ALL exceptions to prevent worker crash
         print(f"[PUSH] Error sending push: {e}")
 
 
@@ -555,65 +564,111 @@ async def get_bot_users_data():
         
     try:
         url, key = get_supabase_config()
-        # Direct download from storage
-        # Bucket: monitor-data, Path: discord_josh/bot_users.json
         storage_url = f"{url}/storage/v1/object/public/monitor-data/discord_josh/bot_users.json"
         
-        async with httpx.AsyncClient() as client:
-            response = await client.get(storage_url)
-            if response.status_code == 200:
-                data = response.json()
-                bot_users_cache["data"] = data
-                bot_users_cache["last_fetched"] = now
-                return data
+        # Use centralized http_client instead of creating a new one
+        response = await http_client.get(storage_url)
+        if response.status_code == 200:
+            data = response.json()
+            bot_users_cache["data"] = data
+            bot_users_cache["last_fetched"] = now
+            return data
     except Exception as e:
         print(f"[BOT] Error fetching bot users: {e}")
         
     return bot_users_cache["data"]
 
+# --- USER STATUS ENDPOINT ---
+
+@app.get("/v1/user/status")
+async def get_user_status(user_id: str = Query(...)):
+    """Get user's current subscription and verification status"""
+    try:
+        response = await http_client.get(
+            f"{URL}/rest/v1/users?id=eq.{user_id}&select=*",
+            headers=HEADERS
+        )
+        if response.status_code == 200 and response.json():
+            user_data = response.json()[0]
+            
+            # Check if premium
+            is_premium = False
+            subscription_end = user_data.get("subscription_end")
+            subscription_status = user_data.get("subscription_status")
+            
+            if subscription_status == "active" and subscription_end:
+                try:
+                    end_dt = datetime.fromisoformat(subscription_end.replace('Z', '+00:00'))
+                    if end_dt.tzinfo is None:
+                        end_dt = end_dt.replace(tzinfo=timezone.utc)
+                    if end_dt > datetime.now(timezone.utc):
+                        is_premium = True
+                except:
+                    pass
+            
+            return {
+                "success": True,
+                "is_premium": is_premium,
+                "email_verified": user_data.get("email_verified", False),
+                "status": subscription_status or "free",
+                "subscription_end": subscription_end
+            }
+        else:
+            return {"success": False, "message": "User not found"}
+    except Exception as e:
+        print(f"[STATUS] Error: {e}")
+        return {"success": False, "message": str(e)}
+
 # --- TELEGRAM LINKING ENDPOINTS ---
 
 @app.get("/v1/user/telegram/link-status")
 async def get_telegram_link_status_endpoint(user_id: str = Query(...)):
-    links = await get_telegram_links_for_user(user_id)
-    if links:
-        link = links[0]
-        telegram_id = link.get("telegram_id")
-        
-        # Check Premium Status from Bot Data
-        bot_users = await get_bot_users_data()
-        user_data = bot_users.get(str(telegram_id), {})
-        expiry_str = user_data.get("expiry")
-        
-        is_premium = False
-        premium_until = None
-        
-        if expiry_str:
-            try:
-                # Simple ISO parse
-                expiry_dt = datetime.fromisoformat(expiry_str.replace('Z', '+00:00'))
-                # If naive, assume UTC
-                if expiry_dt.tzinfo is None:
-                    expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
-                    
-                now_dt = datetime.now(timezone.utc)
-                if expiry_dt > now_dt:
-                    is_premium = True
-                    premium_until = expiry_str
-            except Exception as e:
-                # Fallback for complex date strings if needed
-                print(f"[DATE] Parse error: {e}")
-                pass
+    print(f"[DEBUG] Checking Telegram status for user: '{user_id}'")
+    try:
+        links = await get_telegram_links_for_user(user_id)
+        if links:
+            print(f"[DEBUG] Found {len(links)} links for user {user_id}")
+            link = links[0]
+            telegram_id = link.get("telegram_id")
+            
+            # Check Premium Status from Bot Data
+            bot_users = await get_bot_users_data()
+            if not isinstance(bot_users, dict):
+                bot_users = {}
+                
+            user_data = bot_users.get(str(telegram_id), {})
+            expiry_str = user_data.get("expiry")
+            
+            is_premium = False
+            premium_until = None
+            
+            if expiry_str:
+                try:
+                    # Simple ISO parse
+                    expiry_dt = datetime.fromisoformat(expiry_str.replace('Z', '+00:00'))
+                    if expiry_dt.tzinfo is None:
+                        expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
+                        
+                    now_dt = datetime.now(timezone.utc)
+                    if expiry_dt > now_dt:
+                        is_premium = True
+                        premium_until = expiry_str
+                except Exception as e:
+                    print(f"[DATE] Parse error: {e}")
+                    pass
 
-        return {
-            "success": True, 
-            "linked": True, 
-            "telegram_username": link.get("telegram_username"),
-            "telegram_id": telegram_id,
-            "is_premium": is_premium,
-            "premium_until": premium_until
-        }
-    return {"success": True, "linked": False}
+            return {
+                "success": True, 
+                "linked": True, 
+                "telegram_username": link.get("telegram_username"),
+                "telegram_id": telegram_id,
+                "is_premium": is_premium,
+                "premium_until": premium_until
+            }
+        return {"success": True, "linked": False}
+    except Exception as e:
+        print(f"[LINK] Status Error: {e}")
+        return {"success": False, "message": str(e)}
 
 @app.post("/v1/user/telegram/link")
 async def link_telegram_endpoint(data: Dict = Body(...)):
@@ -627,9 +682,14 @@ async def link_telegram_endpoint(data: Dict = Body(...)):
     try:
         # Check token and expiry
         # Note: 'gt' operator for expiry check
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         response = await http_client.get(
-            f"{URL}/rest/v1/telegram_link_tokens?token=eq.{token}&expires_at=gt.{now_iso}&select=*", 
+            f"{URL}/rest/v1/telegram_link_tokens",
+            params={
+                "token": f"eq.{token}",
+                "expires_at": f"gt.{now_iso}",
+                "select": "*"
+            }, 
             headers=HEADERS
         )
         
@@ -643,18 +703,27 @@ async def link_telegram_endpoint(data: Dict = Body(...)):
             return {"success": False, "message": "Invalid token data"}
             
         # 2. Link Account
-        # Check if already linked to another user? 
-        # For now, simplistic approach: Link to this user.
-        # Ideally we might want to check if this telegram_id is already linked to SOMEONE else.
-        
         existing_link_check = await http_client.get(
             f"{URL}/rest/v1/user_telegram_links?telegram_id=eq.{telegram_id}&select=user_id",
             headers=HEADERS
         )
         if existing_link_check.status_code == 200 and existing_link_check.json():
-            existing_user = existing_link_check.json()[0]['user_id']
-            if existing_user != user_id:
-                 return {"success": False, "message": "Telegram account already linked to another user"}
+            old_user_id = existing_link_check.json()[0]['user_id']
+            if old_user_id != user_id:
+                 print(f"[LINK] Telegram account already linked to user {old_user_id}. Transferring link to {user_id}...")
+                 
+                 # 1. Unlink from old user
+                 await http_client.delete(f"{URL}/rest/v1/user_telegram_links?user_id=eq.{old_user_id}", headers=HEADERS)
+                 
+                 # 2. Reset old user's premium status if it was from Telegram
+                 old_user_data = await get_user_by_id(old_user_id)
+                 if old_user_data and old_user_data.get("subscription_source") == "telegram":
+                     await update_user(old_user_id, {
+                         "subscription_status": "free",
+                         "subscription_end": None,
+                         "subscription_source": None
+                     })
+                     print(f"[LINK] Reset premium for old user {old_user_id} during transfer")
 
         success = await link_telegram_account(user_id, telegram_id)
         
@@ -733,11 +802,24 @@ async def unlink_telegram_endpoint(data: Dict = Body(...)):
          raise HTTPException(status_code=400, detail="Missing user_id")
          
     try:
+        # 1. Delete Link from DB
         response = await http_client.delete(f"{URL}/rest/v1/user_telegram_links?user_id=eq.{user_id}", headers=HEADERS)
+        
+        # 2. Reset Premium Status if it was inherited from Telegram
+        user = await get_user_by_id(user_id)
+        if user and user.get("subscription_source") == "telegram":
+            await update_user(user_id, {
+                "subscription_status": "free",
+                "subscription_end": None,
+                "subscription_source": None
+            })
+            print(f"[LINK] Reset premium status for user {user_id} after unlinking Telegram")
+
         if response.status_code in [200, 204]:
-             return {"success": True, "message": "Unlinked successfully"}
+             return {"success": True, "message": "Unlinked successfully and premium status reset."}
         return {"success": False, "message": "Failed to unlink"}
     except Exception as e:
+        print(f"[LINK] Unlink error: {e}")
         return {"success": False, "message": str(e)}
 
 async def background_notification_worker():
@@ -758,104 +840,115 @@ async def background_notification_worker():
             await asyncio.sleep(60) # Check every 60 seconds
             
             # 1. Fetch all users with push tokens and their preferences
-            response = await http_client.get(f"{URL}/rest/v1/users?select=id,notification_preferences,push_tokens", headers=HEADERS)
-            
-            users_data = []
-            if response.status_code == 200:
-                users_data = response.json()
-            else:
-                # Fallback to local memory tokens if DB columns aren't ready yet
-                # Only log this once per restart to avoid spam
-                if 'MIGRATION_WARNED' not in globals():
-                    print(f"[PUSH] Warning: User preferences DB columns missing (Status {response.status_code}). Using local cache.")
-                    print(f"       Please run the SQL migration to enable cloud sync.")
-                    globals()['MIGRATION_WARNED'] = True
+            if not http_client:
+                 continue
+                 
+            try:
+                response = await http_client.get(f"{URL}/rest/v1/users?select=id,notification_preferences,push_tokens", headers=HEADERS)
                 
-                for uid, tokens in USER_PUSH_TOKENS.items():
-                    users_data.append({"id": uid, "push_tokens": tokens, "notification_preferences": {}})
+                users_data = []
+                if response.status_code == 200:
+                    users_data = response.json()
+                else:
+                    # Fallback to local memory tokens if DB columns aren't ready yet
+                    # Only log this once per restart to avoid spam
+                    if 'MIGRATION_WARNED' not in globals():
+                        print(f"[PUSH] Warning: User preferences DB columns missing (Status {response.status_code}). Using local cache.")
+                        print(f"       Please run the SQL migration to enable cloud sync.")
+                        globals()['MIGRATION_WARNED'] = True
+                    
+                    for uid, tokens in USER_PUSH_TOKENS.items():
+                        users_data.append({"id": uid, "push_tokens": tokens, "notification_preferences": {}})
+            except Exception as e:
+                print(f"[PUSH] Error fetching users: {e}")
+                users_data = []
             
             if not users_data:
-                await asyncio.sleep(60)
                 continue
 
             # 2. Get latest products since LAST_PUSH_CHECK_TIME
             # We check the last 5 messages to ensure we don't miss any during worker overlap
             query = f"order=scraped_at.desc&limit=5"
-            response = await http_client.get(f"{URL}/rest/v1/discord_messages?{query}", headers=HEADERS)
-            if response.status_code == 200 and response.json():
-                messages = response.json()
-                new_messages = []
-                for m in messages:
-                    dt = safe_parse_dt(m.get("scraped_at"))
-                    if dt and dt > LAST_PUSH_CHECK_TIME:
-                        new_messages.append(m)
-                
-                if new_messages:
-                    print(f"[PUSH] {len(new_messages)} new product(s) detected. Processing notifications...")
+            try:
+                response = await http_client.get(f"{URL}/rest/v1/discord_messages?{query}", headers=HEADERS)
+                if response.status_code == 200 and response.json():
+                    messages = response.json()
+                    new_messages = []
+                    for m in messages:
+                        dt = safe_parse_dt(m.get("scraped_at"))
+                        if dt and dt > LAST_PUSH_CHECK_TIME:
+                            new_messages.append(m)
                     
-                    for msg in new_messages:
-                        msg_region = msg.get("region", "USA Stores")
-                        msg_category = msg.get("category_name", "General")
-                        product_data = msg.get("product_data", {})
+                    if new_messages:
+                        print(f"[PUSH] {len(new_messages)} new product(s) detected. Processing notifications...")
                         
-                        # Professional Formatting
-                        title = product_data.get("title", "New Deal Detected!")
-                        if len(title) > 50: title = title[:47] + "..."
-                        
-                        # Generate sleek title with discount info
-                        raw_was = str(product_data.get("was_price", "") or product_data.get("resell_price", ""))
-                        raw_now = str(product_data.get("price", ""))
-                        
-                        # Try to detect discount for the title
-                        prefix = "🔥"
-                        try:
-                            price_val = float(re.sub(r'[^0-9.]', '', raw_now)) if raw_now else 0
-                            was_val = float(re.sub(r'[^0-9.]', '', raw_was)) if raw_was else 0
-                            if was_val > price_val and price_val > 0:
-                                discount = int(((was_val - price_val) / was_val) * 100)
-                                if discount >= 10:
-                                    prefix = f"📉 {discount}% OFF"
-                        except: pass
-                        
-                        final_title = f"{prefix}: {title}"
-                        
-                        # Enhanced informative body
-                        price_info = f"Price: ${raw_now}" if raw_now else "Check Price"
-                        if raw_was and raw_was != raw_now:
-                            price_info += f" (Market: ${raw_was})"
+                        for msg in new_messages:
+                            msg_region = msg.get("region", "USA Stores")
+                            msg_category = msg.get("category_name", "General")
+                            product_data = msg.get("product_data", {})
                             
-                        body = f"{product_data.get('title', 'View Deal')} | {price_info} | {msg_region}"
-                        
-                        # Target specific users based on preferences
-                        target_tokens = []
-                        for u in users_data:
-                            prefs = u.get("notification_preferences") or {}
-                            tokens = u.get("push_tokens")
-                            if not tokens: continue
+                            # Professional Formatting
+                            title = product_data.get("title", "New Deal Detected!")
+                            if len(title) > 50: title = title[:47] + "..."
                             
-                            # Check master toggle (if stored in prefs)
-                            if prefs.get("enabled") == False: continue
+                            # Generate sleek title with discount info
+                            raw_was = str(product_data.get("was_price", "") or product_data.get("resell_price", ""))
+                            raw_now = str(product_data.get("price", ""))
                             
-                            # Check region/category filtering
-                            # Format: {"USA Stores": ["ALL"], "UK Stores": ["flips"]}
-                            user_regions = prefs.get("regions", {})
-                            if not user_regions: 
-                                # Default: notify everyone if no prefs set (or you could be strict)
-                                target_tokens.extend(tokens if isinstance(tokens, list) else [tokens])
-                                continue
+                            # Try to detect discount for the title
+                            prefix = "🔥"
+                            try:
+                                price_val = float(re.sub(r'[^0-9.]', '', raw_now)) if raw_now else 0
+                                was_val = float(re.sub(r'[^0-9.]', '', raw_was)) if raw_was else 0
+                                if was_val > price_val and price_val > 0:
+                                    discount = int(((was_val - price_val) / was_val) * 100)
+                                    if discount >= 10:
+                                        prefix = f"📉 {discount}% OFF"
+                            except: pass
+                            
+                            final_title = f"{prefix}: {title}"
+                            
+                            # Enhanced informative body
+                            price_info = f"Price: ${raw_now}" if raw_now else "Check Price"
+                            if raw_was and raw_was != raw_now:
+                                price_info += f" (Market: ${raw_was})"
                                 
-                            if msg_region in user_regions:
-                                allowed_cats = user_regions[msg_region]
-                                if "ALL" in allowed_cats or msg_category in allowed_cats:
+                            body = f"{product_data.get('title', 'View Deal')} | {price_info} | {msg_region}"
+                            
+                            # Target specific users based on preferences
+                            target_tokens = []
+                            for u in users_data:
+                                prefs = u.get("notification_preferences") or {}
+                                tokens = u.get("push_tokens")
+                                if not tokens: continue
+                                
+                                # Check master toggle (if stored in prefs)
+                                if prefs.get("enabled") == False: continue
+                                
+                                # Check region/category filtering
+                                # Format: {"USA Stores": ["ALL"], "UK Stores": ["flips"]}
+                                user_regions = prefs.get("regions", {})
+                                if not user_regions: 
+                                    # Default: notify everyone if no prefs set (or you could be strict)
                                     target_tokens.extend(tokens if isinstance(tokens, list) else [tokens])
+                                    continue
+                                    
+                                if msg_region in user_regions:
+                                    allowed_cats = user_regions[msg_region]
+                                    if "ALL" in allowed_cats or msg_category in allowed_cats:
+                                        target_tokens.extend(tokens if isinstance(tokens, list) else [tokens])
+                            
+                            if target_tokens:
+                                print(f"[PUSH] Sending to {len(set(target_tokens))} devices...")
+                                await send_expo_push_notification(list(set(target_tokens)), final_title, body, {"product_id": msg["id"]})
                         
-                        if target_tokens:
-                            print(f"[PUSH] Sending to {len(set(target_tokens))} devices...")
-                            await send_expo_push_notification(list(set(target_tokens)), final_title, body, {"product_id": msg["id"]})
-                    
-                    LAST_PUSH_CHECK_TIME = datetime.now(timezone.utc)
+                        LAST_PUSH_CHECK_TIME = datetime.now(timezone.utc)
+            except Exception as e:
+                print(f"[PUSH] Error processing messages: {e}")
+                
         except Exception as e:
             print(f"[PUSH] Worker error: {e}")
+            await asyncio.sleep(60) # Sleep before retry
 
 
 @app.post("/v1/auth/login")

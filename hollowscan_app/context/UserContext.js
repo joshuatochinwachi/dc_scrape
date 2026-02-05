@@ -307,7 +307,10 @@ export const UserProvider = ({ children }) => {
     const trackProductView = async (productId) => {
         try {
             // Check if premium - bypass limit
-            if (user?.isPremium) {
+            // NEW: Use combined premium check (User subscription OR Telegram linking)
+            const isUserPremium = user?.isPremium || isPremiumTelegram;
+
+            if (isUserPremium) {
                 console.log('[LIMIT] Premium user - unlimited views');
                 return { allowed: true, remaining: Infinity };
             }
@@ -406,19 +409,61 @@ export const UserProvider = ({ children }) => {
         }
     };
 
+    const unlinkTelegramAccount = async () => {
+        if (!user?.id) return { success: false, message: 'Not logged in' };
+        try {
+            const response = await fetch(`${Constants.API_BASE_URL}/v1/user/telegram/unlink`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: user.id }),
+            });
+            const data = await response.json();
+            if (data.success) {
+                setTelegramLinked(false);
+                setIsPremiumTelegram(false);
+                setPremiumUntil(null);
+                refreshUserStatus();
+            }
+            return data;
+        } catch (error) {
+            console.error('[TELEGRAM] Unlink error:', error);
+            return { success: false, message: 'Connection error' };
+        }
+    };
+
     const checkTelegramStatus = async (specificUserId = null) => {
         const idToCheck = specificUserId || user?.id;
+        console.log(`[DEBUG] checkTelegramStatus for ID: '${idToCheck}'`);
         if (!idToCheck) return;
 
         try {
-            const response = await fetch(
-                `${Constants.API_BASE_URL}/v1/user/telegram/link-status?user_id=${idToCheck}`
-            );
-            const data = await response.json();
+            const url = `${Constants.API_BASE_URL}/v1/user/telegram/link-status?user_id=${idToCheck}`;
+            console.log(`[DEBUG] Fetching TG status from: ${url}`);
+            const response = await fetch(url);
+
+            if (!response.ok) {
+                const text = await response.text();
+                console.error(`[TELEGRAM] Status check failed (${response.status}):`, text);
+                return { linked: false, error: `Server error: ${response.status}` };
+            }
+
+            let data;
+            try {
+                data = await response.json();
+            } catch (err) {
+                const text = await response.text();
+                console.error('[TELEGRAM] JSON Parse Error. Response:', text);
+                return { linked: false, error: 'Invalid response from server' };
+            }
+
             if (data.success && data.linked) {
                 setTelegramLinked(true);
                 setIsPremiumTelegram(data.is_premium || false);
                 setPremiumUntil(data.premium_until || null);
+
+                // Sycn with main user state too
+                refreshUserStatus();
+
                 return { linked: true, isPremium: data.is_premium };
             } else {
                 setTelegramLinked(false);
@@ -426,7 +471,7 @@ export const UserProvider = ({ children }) => {
             }
         } catch (error) {
             console.error('[TELEGRAM] Status check error:', error);
-            return { linked: false, error };
+            return { linked: false, error: error.message };
         }
     };
 
@@ -490,6 +535,7 @@ export const UserProvider = ({ children }) => {
                 forgotPassword,
                 resetPassword,
                 linkTelegramAccount,
+                unlinkTelegramAccount,
                 checkTelegramStatus,
                 telegramLinked,
                 isPremiumTelegram,

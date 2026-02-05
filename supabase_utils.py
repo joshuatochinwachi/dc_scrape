@@ -374,7 +374,7 @@ def store_telegram_link_token(token: str, telegram_id: str, debug: bool = True) 
     
     # Expires in 10 minutes
     from datetime import datetime, timedelta, timezone
-    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat().replace('+00:00', 'Z')
     
     payload = {
         "token": token,
@@ -418,6 +418,94 @@ def delete_user_telegram_link(telegram_id: str, debug: bool = True) -> bool:
     except Exception as e:
         if debug: print(f"❌ Link deletion error: {e}")
         return False
+
+def link_app_user_to_telegram(user_id: str, telegram_id: str, telegram_username: str = None, premium_info: Dict = None, debug: bool = True) -> Dict:
+    """
+    Robustly link an App User to a Telegram ID.
+    Handles duplicates, updates timestamps, and syncs premium status.
+    """
+    url, key = get_supabase_config()
+    headers = {
+        'apikey': key,
+        'Authorization': f'Bearer {key}',
+        'Content-Type': 'application/json',
+        'Prefer': 'return=minimal'
+    }
+    
+    from datetime import datetime, timezone
+    now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+    try:
+        # 1. Check if already linked
+        check_resp = requests.get(
+            f"{url}/rest/v1/user_telegram_links?telegram_id=eq.{telegram_id}&select=user_id",
+            headers=headers,
+            timeout=10
+        )
+        if check_resp.status_code == 200:
+            existing = check_resp.json()
+            if existing:
+                existing_uid = existing[0]['user_id']
+                if existing_uid != user_id:
+                    # Telegram account linked to someone else - unlink it first (force re-link)
+                    if debug: print(f"[LINK] Telegram {telegram_id} was linked to {existing_uid}, re-linking to {user_id}...")
+                    delete_resp = requests.delete(
+                        f"{url}/rest/v1/user_telegram_links?telegram_id=eq.{telegram_id}",
+                        headers=headers,
+                        timeout=10
+                    )
+                    if delete_resp.status_code not in [200, 204]:
+                        if debug: print(f"❌ Failed to unlink old connection: {delete_resp.text}")
+                else:
+                    # Already linked to correct user
+                    if debug: print(f"[LINK] Telegram {telegram_id} already linked to {user_id}, updating...")
+
+        # 2. Upsert Link
+        payload = {
+            "user_id": user_id,
+            "telegram_id": str(telegram_id),
+            "telegram_username": telegram_username,
+            "linked_at": now_iso
+        }
+        
+        # Using upsert so it updates if exists/re-adds
+        upsert_resp = requests.post(
+            f"{url}/rest/v1/user_telegram_links", 
+            headers={**headers, "Prefer": "resolution=merge-duplicates"},
+            json=payload, 
+            timeout=10
+        )
+        
+        if upsert_resp.status_code not in [200, 201, 204]:
+            if debug: print(f"❌ Link upsert failed: {upsert_resp.text}")
+            return {"success": False, "message": "Database link failed."}
+
+        # 3. Sync Premium (if provided)
+        # premium_info = {"status": "active", "end": "ISO-DATE", "source": "telegram"}
+        if premium_info and premium_info.get("status") == "active":
+            user_update = {
+                "subscription_status": "active",
+                "subscription_end": premium_info.get("end"),
+                "subscription_source": premium_info.get("source", "telegram")
+            }
+            # Only update if user is NOT already premium on app? 
+            # Strategy: Overwrite with latest Telegram premium always, or check? 
+            # For now, we trust the bot's call to sync.
+            
+            patch_resp = requests.patch(
+                f"{url}/rest/v1/users?id=eq.{user_id}",
+                headers=headers,
+                json=user_update,
+                timeout=10
+            )
+            if debug: print(f"✅ Synced premium for {user_id}: {patch_resp.status_code}")
+
+        if debug: print(f"✅ Linked {user_id} <-> {telegram_id}")
+        return {"success": True, "message": "Successfully linked!"}
+
+    except Exception as e:
+        if debug: print(f"❌ Link Exception: {e}")
+        return {"success": False, "message": str(e)}
 
 
 if __name__ == "__main__":
