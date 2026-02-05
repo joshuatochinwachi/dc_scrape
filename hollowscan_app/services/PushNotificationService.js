@@ -110,7 +110,7 @@ export const sendDealNotification = async (product) => {
 };
 
 // Register for remote push notifications (for Telegram bot integration)
-export const registerForPushNotifications = async () => {
+export const registerForPushNotifications = async (userId) => {
     try {
         const hasPermission = await requestNotificationPermissions();
         if (!hasPermission) return null;
@@ -118,6 +118,11 @@ export const registerForPushNotifications = async () => {
         if (Device.isDevice) {
             const token = (await Notifications.getExpoPushTokenAsync()).data;
             console.log('[NOTIFICATIONS] Expo Push Token:', token);
+
+            if (userId) {
+                await savePushTokenToBackend(userId, token);
+            }
+
             return token;
         }
     } catch (error) {
@@ -125,3 +130,18 @@ export const registerForPushNotifications = async () => {
         return null;
     }
 };
+
+export const savePushTokenToBackend = async (userId, token) => {
+    try {
+        const response = await fetch(`${Constants.API_BASE_URL}/v1/user/push-token?user_id=${userId}&token=${token}`, {
+            method: 'POST',
+        });
+        const data = await response.json();
+        console.log('[NOTIFICATIONS] Save token response:', data);
+        return data.success;
+    } catch (error) {
+        console.log('[NOTIFICATIONS] Error saving token to backend:', error);
+        return false;
+    }
+};
+

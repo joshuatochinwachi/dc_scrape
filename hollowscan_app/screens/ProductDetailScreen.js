@@ -20,28 +20,30 @@ const ProductDetailScreen = ({ route, navigation }) => {
 
     const colors = isDarkMode ? {
         bg: brand.DARK_BG,
-        card: '#161617',
-        subCard: '#1C1C1E',
-        text: '#F4F4F5', // Softer White
-        textSecondary: '#A1A1AA', // Better contrast Zinc-400
-        border: 'rgba(255,255,255,0.06)',
+        card: '#1C1C1E',
+        subCard: '#2C2C2E',
+        text: '#FAFAFA',
+        textSecondary: '#A1A1AA',
+        border: 'rgba(255,255,255,0.08)',
         divider: 'rgba(255,255,255,0.04)',
         noteBg: 'rgba(251, 191, 36, 0.08)',
         noteBorder: 'rgba(251, 191, 36, 0.15)',
         noteText: '#FCD34D',
-        accent: '#6366F1' // Indigo
+        accent: brand.BLUE,
+        profitCard: '#242426'
     } : {
-        bg: '#F8F9FE',
+        bg: '#F2F4F8',
         card: '#FFFFFF',
         subCard: '#F9FAFB',
         text: '#1C1C1E',
-        textSecondary: '#636366',
-        border: 'rgba(0,0,0,0.05)',
-        divider: 'rgba(0,0,0,0.05)',
+        textSecondary: '#6B7280',
+        border: 'rgba(0,0,0,0.04)',
+        divider: 'rgba(0,0,0,0.03)',
         noteBg: '#FFFAED',
         noteBorder: '#FCD34D',
         noteText: '#92400E',
-        accent: brand.BLUE
+        accent: brand.BLUE,
+        profitCard: '#FFFFFF'
     };
 
     // Handle both direct navigation and deep link
@@ -70,9 +72,72 @@ const ProductDetailScreen = ({ route, navigation }) => {
     const data = product.product_data || {};
     const saved = isSaved(product.id);
 
+    // Helper to parse price data from API (handles "Was: X Now: Y" formats)
+    const parsePriceData = (productData, region) => {
+        let currentPrice = 0;
+        let originalPrice = 0;
+        let discountPercent = 0;
+
+        // Try to handle various discount price formats
+        const rawPriceString = String(productData.price || '');
+
+        // Pattern 1: "Was: 29.99 Now: 19.99" (robust for currency symbols/spaces)
+        let match = rawPriceString.match(/Was[:\s]+[^\d\.]*([\d.]+).*?Now[:\s]+[^\d\.]*([\d.]+)/i);
+        if (match) {
+            originalPrice = parseFloat(match[1]);
+            currentPrice = parseFloat(match[2]);
+        } else {
+            // Pattern 2: "Now: 19.99 Was: 29.99" (reversed)
+            match = rawPriceString.match(/Now[:\s]+[^\d\.]*([\d.]+).*?Was[:\s]+[^\d\.]*([\d.]+)/i);
+            if (match) {
+                currentPrice = parseFloat(match[1]);
+                originalPrice = parseFloat(match[2]);
+            } else {
+                // Pattern 3: Separate fields or plain number
+                currentPrice = parseFloat(String(productData.price || '0').replace(/[^0-9.]/g, '')) || 0;
+                originalPrice = parseFloat(String(productData.was_price || '0').replace(/[^0-9.]/g, '')) || 0;
+            }
+        }
+
+        // FALLBACK: If price is still 0, check details array for "PRICING INFORMATION"
+        if (currentPrice === 0 && productData.details && Array.isArray(productData.details)) {
+            const pricingDetail = productData.details.find(d =>
+                (d.label || '').toLowerCase().includes('pricing') ||
+                (d.label || '').toLowerCase().includes('price')
+            );
+
+            if (pricingDetail && pricingDetail.value) {
+                const detailString = String(pricingDetail.value);
+                // Try Pattern 1 
+                let match = detailString.match(/Was[:\s]+[^\d\.]*([\d.]+).*?Now[:\s]+[^\d\.]*([\d.]+)/i);
+                if (match) {
+                    originalPrice = parseFloat(match[1]);
+                    currentPrice = parseFloat(match[2]);
+                } else {
+                    // Try Pattern 2
+                    match = detailString.match(/Now[:\s]+[^\d\.]*([\d.]+).*?Was[:\s]+[^\d\.]*([\d.]+)/i);
+                    if (match) {
+                        currentPrice = parseFloat(match[1]);
+                        originalPrice = parseFloat(match[2]);
+                    }
+                }
+            }
+        }
+
+        const resellPrice = parseFloat(String(productData.resell || '0').replace(/[^0-9.]/g, '')) || 0;
+
+        // Calculate discount percentage
+        if (originalPrice > currentPrice && currentPrice > 0) {
+            discountPercent = Math.round(((originalPrice - currentPrice) / originalPrice) * 100);
+        }
+
+        return { currentPrice, originalPrice, resellPrice, discountPercent };
+    };
+
+    // Parse price data
+    const { currentPrice: buyPrice, originalPrice: wasPrice, resellPrice: sellPrice, discountPercent } = parsePriceData(data, product.region);
+
     // Calculate Fees & Profit
-    const buyPrice = parseFloat(data.price || '0');
-    const sellPrice = parseFloat(data.resell || '0');
 
     // Default fees ~15% if not specified
     const feePercent = 15;
@@ -138,14 +203,12 @@ const ProductDetailScreen = ({ route, navigation }) => {
     // --- HELPERS ---
     const formatPriceDisplay = (value, region) => {
         if (!value || isNaN(value) || value === 0) {
-            if (region?.includes('UK')) return '£0.00';
-            if (region?.includes('Canada')) return 'CAD 0.00';
-            return '$0.00';
+            const symbol = region?.includes('UK') ? '£' : region?.includes('Canada') ? 'CAD ' : '$';
+            return `${symbol}0.00`;
         }
 
         const num = parseFloat(value);
 
-        // Custom formatting for CAD to meet user requirement "CAD 74.00"
         if (region?.includes('Canada')) {
             const usd = (num * 0.73).toFixed(0);
             return `CAD ${num.toFixed(2)} (USD ${usd})`;
@@ -157,7 +220,6 @@ const ProductDetailScreen = ({ route, navigation }) => {
             minimumFractionDigits: 2
         }).format(num);
 
-        // Add USD equivalent for UK
         if (region?.includes('UK')) {
             const usd = (num * 1.25).toFixed(0);
             return `${formatted} (USD ${usd})`;
@@ -170,10 +232,22 @@ const ProductDetailScreen = ({ route, navigation }) => {
     const renderPriceValue = (value) => {
         if (!value) return null;
 
-        // Check for discount pattern: "~~15~~ 10" or "£15 (30%) £10"
+        // Check for discount pattern: "Was: 10.50 Now: 4.50"
+        const wasNowMatch = value.match(/Was:\s*([\d.]+)\s*Now:\s*([\d.]+)/i);
+        if (wasNowMatch) {
+            const was = parseFloat(wasNowMatch[1]);
+            const now = parseFloat(wasNowMatch[2]);
+            return (
+                <Text>
+                    <Text style={{ textDecorationLine: 'line-through', opacity: 0.6 }}>{formatPriceDisplay(was, product.region)}</Text>
+                    <Text style={{ fontWeight: '900', color: '#EF4444' }}> {formatPriceDisplay(now, product.region)}</Text>
+                </Text>
+            );
+        }
+
+        // Generic pattern matching for other formats
         if (value.includes('~~')) {
             const parts = value.split('~~');
-            // parts[0] is before, parts[1] is stuck through, parts[2] is after
             return (
                 <Text>
                     {parts[0]}
@@ -183,25 +257,14 @@ const ProductDetailScreen = ({ route, navigation }) => {
             );
         }
 
-        if (value.includes('(') && value.includes(')')) {
-            // Handle "£15 (30%) £10" -> "£15" (strike) "(30%) £10"
-            const match = value.match(/([£$\d.]+)\s*(\(.*\))\s*([£$\d.]+)/);
-            if (match) {
-                return (
-                    <Text>
-                        <Text style={{ textDecorationLine: 'line-through', opacity: 0.6 }}>{match[1]}</Text>
-                        <Text> {match[2]} </Text>
-                        <Text style={{ fontWeight: '900', color: '#10B981' }}>{match[3]}</Text>
-                    </Text>
-                );
-            }
-        }
-
         return <Text>{value}</Text>;
     };
 
-    // Filter out redundant fields that are already in the top card
-    const visibleDetails = data.details ? data.details.filter(d => !d.is_redundant) : [];
+    // Filter out redundant fields that are already in the top card or hero section
+    const visibleDetails = data.details ? data.details.filter(d => {
+        const label = (d.label || '').toLowerCase();
+        return !d.is_redundant && !label.includes('price') && !label.includes('pricing');
+    }) : [];
 
     return (
         <SafeAreaView style={[styles.container, { backgroundColor: colors.bg }]} edges={['top']}>
@@ -224,7 +287,7 @@ const ProductDetailScreen = ({ route, navigation }) => {
             <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
                 {/* IMAGE HERO */}
                 <View style={[styles.imageContainer, { backgroundColor: colors.card, borderColor: colors.border }]}>
-                    <Image source={{ uri: data.thumbnail || 'https://via.placeholder.com/300' }} style={styles.image} resizeMode="contain" />
+                    <Image source={{ uri: data.image || data.thumbnail || 'https://via.placeholder.com/300' }} style={styles.image} resizeMode="contain" />
                     <TouchableOpacity
                         style={[styles.saveBtn, { backgroundColor: isDarkMode ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.8)' }]}
                         onPress={() => toggleSave(product)}
@@ -247,38 +310,103 @@ const ProductDetailScreen = ({ route, navigation }) => {
                     </View>
                 </View>
 
-                {/* PROFIT ANALYSIS BOX */}
+                {/* PREMIUM DISCOUNT SECTION (E-COMMERCE HERO) */}
+                {wasPrice > buyPrice && buyPrice > 0 ? (
+                    <View style={{ marginHorizontal: 16, marginBottom: 16 }}>
+                        <LinearGradient
+                            colors={['#FF6B6B', '#EE5A6F']}
+                            start={{ x: 0, y: 0 }}
+                            end={{ x: 1, y: 1 }}
+                            style={styles.heroDiscountCard}
+                        >
+                            {/* Large Discount Badge */}
+                            <View style={styles.heroDiscountBadge}>
+                                <Text style={styles.heroDiscountPercent}>
+                                    -{discountPercent}%
+                                </Text>
+                                <Text style={styles.heroDiscountLabel}>OFF</Text>
+                            </View>
+
+                            {/* Savings Display */}
+                            <View style={styles.heroSavingsRow}>
+                                <Text style={styles.heroSavingsLabel}>🎉 You Save</Text>
+                                <Text style={styles.heroSavingsAmount}>
+                                    {formatPriceDisplay(wasPrice - buyPrice, product.region)}
+                                </Text>
+                            </View>
+
+                            {/* Price Comparison */}
+                            <View style={styles.heroPriceRow}>
+                                <View style={{ flex: 1 }}>
+                                    <Text style={styles.heroNowLabel}>Now</Text>
+                                    <Text style={styles.heroNowPrice}>{formatPriceDisplay(buyPrice, product.region)}</Text>
+                                </View>
+                                <View style={styles.heroPriceDivider} />
+                                <View style={{ flex: 1, alignItems: 'flex-end' }}>
+                                    <Text style={styles.heroWasLabel}>Was</Text>
+                                    <Text style={styles.heroWasPrice}>{formatPriceDisplay(wasPrice, product.region)}</Text>
+                                </View>
+                            </View>
+                        </LinearGradient>
+                    </View>
+                ) : null}
+
+
+                {/* PROFIT ANALYSIS BOX - REVAMPED FOR SLEEK/COZY FEEL */}
                 {sellPrice > 0 ? (
-                    <LinearGradient
-                        colors={[brand.BLUE, brand.PURPLE]}
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 1, y: 1 }}
-                        style={styles.profitBox}
-                    >
-                        <View style={styles.profitHeader}>
-                            <Text style={[styles.profitTitle, { color: '#FFF' }]}>Estimated Profit Analysis</Text>
-                            <View style={styles.roiBadge}>
-                                <Text style={styles.roiText}>{roi}% ROI</Text>
+                    <View style={[styles.profitAnalysisCard, { backgroundColor: colors.profitCard, borderColor: colors.border }]}>
+                        <View style={styles.profitAnalysisHeader}>
+                            <View style={[styles.profitIconBox, { backgroundColor: brand.BLUE + '15' }]}>
+                                <Text style={{ fontSize: 18 }}>📊</Text>
+                            </View>
+                            <View style={{ flex: 1, marginLeft: 12 }}>
+                                <Text style={[styles.profitAnalysisTitle, { color: colors.text }]}>
+                                    {buyPrice > 0 && sellPrice > buyPrice ? 'Deal Sustainability' : 'Market Overview'}
+                                </Text>
+                                <Text style={[styles.profitAnalysisSub, { color: colors.textSecondary }]}>
+                                    {buyPrice > 0 && sellPrice > buyPrice ? 'Based on latest market data' : 'Estimated current value'}
+                                </Text>
+                            </View>
+                            {buyPrice > 0 && roi > 0 && (
+                                <LinearGradient
+                                    colors={[brand.BLUE, '#8B5CF6']}
+                                    start={{ x: 0, y: 0 }}
+                                    end={{ x: 1, y: 1 }}
+                                    style={styles.roiBadgeLarge}
+                                >
+                                    <Text style={styles.roiTextLarge}>{roi}% ROI</Text>
+                                </LinearGradient>
+                            )}
+                        </View>
+
+                        <View style={[styles.profitStatsGrid, { borderTopColor: colors.divider }]}>
+                            <View style={styles.profitStatItem}>
+                                <Text style={[styles.profitStatLabel, { color: colors.textSecondary }]}>Cost Price</Text>
+                                <Text style={[styles.profitStatValue, { color: colors.text }]}>
+                                    {formatPriceDisplay(buyPrice > 0 ? buyPrice : 0, product.region)}
+                                </Text>
+                            </View>
+                            <View style={[styles.profitStatDivider, { backgroundColor: colors.divider }]} />
+                            <View style={styles.profitStatItem}>
+                                <Text style={[styles.profitStatLabel, { color: colors.textSecondary }]}>Market Value</Text>
+                                <Text style={[styles.profitStatValue, { color: '#10B981' }]}>
+                                    {formatPriceDisplay(sellPrice, product.region)}
+                                </Text>
                             </View>
                         </View>
 
-                        <View style={styles.profitGrid}>
-                            <View style={styles.profitItem}>
-                                <Text style={[styles.pLabel, { color: 'rgba(255,255,255,0.7)' }]}>Purchase</Text>
-                                <Text style={[styles.pValue, { color: '#FFF' }]}>{formatPriceDisplay(buyPrice, product.region)}</Text>
+                        {buyPrice > 0 && sellPrice > 0 && (
+                            <View style={[styles.netProfitRow, { backgroundColor: isDarkMode ? 'rgba(255,255,255,0.03)' : '#F9FBFF' }]}>
+                                <View style={{ flex: 1 }}>
+                                    <Text style={[styles.netProfitLabel, { color: colors.textSecondary }]}>Potential Profit (Net)</Text>
+                                    <Text style={[styles.netProfitDesc, { color: colors.textSecondary }]}>After 15% estimated marketplace fees</Text>
+                                </View>
+                                <Text style={[styles.netProfitValue, { color: netProfit > 0 ? '#10B981' : '#EF4444' }]}>
+                                    {netProfit > 0 ? '+' : ''}{formatPriceDisplay(netProfit, product.region)}
+                                </Text>
                             </View>
-                            <View style={[styles.pDivider, { backgroundColor: 'rgba(255,255,255,0.15)' }]} />
-                            <View style={styles.profitItem}>
-                                <Text style={[styles.pLabel, { color: 'rgba(255,255,255,0.7)' }]}>Fees (15%)</Text>
-                                <Text style={[styles.pValue, { color: '#FFF' }]}>{formatPriceDisplay(fees, product.region)}</Text>
-                            </View>
-                            <View style={[styles.pDivider, { backgroundColor: 'rgba(255,255,255,0.15)' }]} />
-                            <View style={styles.profitItem}>
-                                <Text style={[styles.pLabel, { color: 'rgba(255,255,255,0.7)' }]}>Net Profit</Text>
-                                <Text style={[styles.pNetValue, { color: '#FFF' }]}>+{formatPriceDisplay(netProfit, product.region)}</Text>
-                            </View>
-                        </View>
-                    </LinearGradient>
+                        )}
+                    </View>
                 ) : null}
 
                 {/* DESCRIPTION SECTION */}
@@ -358,7 +486,7 @@ const ProductDetailScreen = ({ route, navigation }) => {
                                     <Text style={[styles.buySource, { color: colors.textSecondary }]}>Retail Price</Text>
                                 </View>
                                 <Text style={[styles.buyPrice, { color: '#10B981' }]}>
-                                    ${buyPrice.toFixed(2)}
+                                    {formatPriceDisplay(buyPrice, product.region)}
                                 </Text>
                             </TouchableOpacity>
                         )}
@@ -396,8 +524,8 @@ const ProductDetailScreen = ({ route, navigation }) => {
                                 <Text style={[styles.buyLabel, { color: colors.text }]}>Resell on eBay</Text>
                                 <Text style={[styles.buySource, { color: colors.textSecondary }]}>View Similar Sales</Text>
                             </View>
-                            <Text style={[styles.buyPrice, { color: brand.PURPLE }]}>
-                                ${sellPrice.toFixed(2)}
+                            <Text style={[styles.buyPrice, { color: sellPrice > 0 ? brand.PURPLE : colors.textSecondary }]}>
+                                {sellPrice > 0 ? formatPriceDisplay(sellPrice, product.region) : 'Visit ›'}
                             </Text>
                         </TouchableOpacity>
 
@@ -469,225 +597,253 @@ const ProductDetailScreen = ({ route, navigation }) => {
 
 const styles = StyleSheet.create({
     container: { flex: 1 },
-
     header: {
         flexDirection: 'row',
         justifyContent: 'space-between',
         alignItems: 'center',
         paddingHorizontal: 16,
-        paddingVertical: 12,
+        paddingVertical: 14,
         borderBottomWidth: 1,
-    },
-    headerBtn: {
-        width: 40,
-        height: 40,
-        justifyContent: 'center',
-        alignItems: 'center',
-        borderRadius: 12,
-        marginHorizontal: 4
+        elevation: 2,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 1 },
+        shadowOpacity: 0.05,
+        shadowRadius: 2,
     },
     headerTitle: {
-        fontSize: 18,
-        fontWeight: '900',
+        fontSize: 17,
+        fontWeight: '800',
         flex: 1,
         textAlign: 'center'
     },
+    scrollContent: { paddingHorizontal: 16, paddingTop: 16 },
 
-    scrollContent: { paddingHorizontal: 20, paddingTop: 10 },
-
+    // IMAGE HERO
     imageContainer: {
         width: '100%',
-        height: 320,
-        borderRadius: 20,
-        marginBottom: 20,
+        height: 340,
+        borderRadius: 24,
+        marginBottom: 24,
         overflow: 'hidden',
         borderWidth: 1,
         shadowColor: '#000',
-        shadowOffset: { width: 0, height: 8 },
+        shadowOffset: { width: 0, height: 10 },
         shadowOpacity: 0.1,
-        shadowRadius: 12,
-        elevation: 5
+        shadowRadius: 20,
+        elevation: 8
     },
-    image: { width: '100%', height: '100%', borderRadius: 20 },
-    imageGradient: {
+    image: { width: '100%', height: '100%' },
+    saveBtn: {
         position: 'absolute',
-        bottom: 0,
-        left: 0,
-        right: 0,
-        height: 100
-    },
-
-    section: { marginBottom: 32 },
-    title: { fontSize: 22, fontWeight: '900', marginBottom: 12, lineHeight: 30, letterSpacing: -0.5 },
-
-    tagsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-    tag: {
-        paddingHorizontal: 12,
-        paddingVertical: 8,
-        borderRadius: 10,
+        top: 16,
+        right: 16,
+        width: 48,
+        height: 48,
+        borderRadius: 24,
+        justifyContent: 'center',
+        alignItems: 'center',
         shadowColor: '#000',
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.05,
-        shadowRadius: 4,
-        elevation: 1
-    },
-    tagText: { fontSize: 13, fontWeight: '700' },
-
-    profitCard: {
-        borderRadius: 18,
-        padding: 16,
-        marginBottom: 28,
-        shadowColor: '#2D82FF',
         shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.15,
-        shadowRadius: 12,
+        shadowOpacity: 0.1,
+        shadowRadius: 8,
         elevation: 4
     },
-    cardHeader: { marginBottom: 16 },
-    cardTitle: { fontSize: 17, fontWeight: '900' },
+    regionBadge: {
+        position: 'absolute',
+        bottom: 16,
+        left: 16,
+        paddingHorizontal: 14,
+        paddingVertical: 8,
+        borderRadius: 12,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.2,
+        shadowRadius: 8,
+    },
+    regionText: { color: '#FFF', fontSize: 13, fontWeight: '800' },
 
-    profitGrid: {
+    // TITLE SECTION
+    titleSection: { marginBottom: 24, paddingHorizontal: 4 },
+    title: { fontSize: 24, fontWeight: '900', marginBottom: 12, lineHeight: 32, letterSpacing: -0.5 },
+    metaRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap' },
+    retailer: { fontSize: 15, fontWeight: '800', marginRight: 12 },
+    statusBadge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 },
+    statusText: { fontSize: 13, fontWeight: '700' },
+
+    // REVAMPED PROFIT ANALYSIS CARD
+    profitAnalysisCard: {
+        borderRadius: 24,
+        padding: 24,
+        borderWidth: 1,
+        marginBottom: 32,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.05,
+        shadowRadius: 12,
+        elevation: 3
+    },
+    profitAnalysisHeader: {
         flexDirection: 'row',
-        justifyContent: 'space-between',
+        alignItems: 'center',
+        marginBottom: 24
+    },
+    profitIconBox: {
+        width: 44,
+        height: 44,
+        borderRadius: 14,
+        justifyContent: 'center',
         alignItems: 'center'
     },
-    profitItem: {
-        flex: 1,
-        paddingRight: 12
+    profitAnalysisTitle: { fontSize: 17, fontWeight: '900' },
+    profitAnalysisSub: { fontSize: 13, marginTop: 2 },
+    roiBadgeLarge: {
+        paddingHorizontal: 14,
+        paddingVertical: 8,
+        borderRadius: 12,
     },
-    profitLabel: {
-        fontSize: 10,
-        fontWeight: '800',
-        letterSpacing: 0.5,
-        marginBottom: 6,
-        textTransform: 'uppercase'
-    },
-    profitValue: { fontSize: 18, fontWeight: '900' },
+    roiTextLarge: { color: '#FFF', fontWeight: '900', fontSize: 14 },
 
-    divider: {
-        height: 1,
+    profitStatsGrid: {
+        flexDirection: 'row',
+        paddingTop: 20,
+        borderTopWidth: 1,
+        marginBottom: 24
     },
+    profitStatItem: { flex: 1 },
+    profitStatLabel: { fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 },
+    profitStatValue: { fontSize: 20, fontWeight: '900' },
+    profitStatDivider: { width: 1, height: '80%', alignSelf: 'center', marginHorizontal: 20 },
 
-    sectionTitle: {
-        fontSize: 16,
-        fontWeight: '900',
-        marginBottom: 14,
-        letterSpacing: 0.3
-    },
-
-    linksContainer: {
+    netProfitRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        padding: 20,
         borderRadius: 20,
-        overflow: 'hidden',
-        borderWidth: 1,
     },
+    netProfitLabel: { fontSize: 14, fontWeight: '800' },
+    netProfitDesc: { fontSize: 11, marginTop: 2 },
+    netProfitValue: { fontSize: 22, fontWeight: '900' },
 
+    // SECTION STYLES
+    section: { marginBottom: 32 },
+    sectionTitle: { fontSize: 18, fontWeight: '900', marginBottom: 16 },
+
+    // LINKS & DETAILS
+    linksContainer: { borderRadius: 24, overflow: 'hidden', borderWidth: 1 },
     linkRow: {
         flexDirection: 'row',
         justifyContent: 'space-between',
         alignItems: 'center',
-        padding: 14,
+        padding: 16,
         borderBottomWidth: 1,
     },
-    linkText: { fontSize: 14, fontWeight: '600', flex: 1 },
+    linkText: { fontSize: 15, fontWeight: '600' },
 
-    descriptionText: { fontSize: 14, color: '#4B5563', lineHeight: 22, fontWeight: '500' },
-
-    detailsContainer: {
-        borderRadius: 20,
-        padding: 4,
-        borderWidth: 1,
-    },
+    detailsContainer: { borderRadius: 24, padding: 8, borderWidth: 1 },
     detailRow: {
         flexDirection: 'row',
         justifyContent: 'space-between',
-        padding: 12,
+        padding: 14,
         borderBottomWidth: 1,
     },
-    detailLabel: { fontSize: 13, fontWeight: '700', textTransform: 'uppercase' },
-    detailValue: { fontSize: 13, fontWeight: '600', flex: 1, textAlign: 'right', marginLeft: 10 },
+    detailLabel: { fontSize: 12, fontWeight: '800', textTransform: 'uppercase', opacity: 0.8 },
+    detailValue: { fontSize: 14, fontWeight: '700', flex: 1, textAlign: 'right', marginLeft: 16 },
 
     buyRow: {
         flexDirection: 'row',
         justifyContent: 'space-between',
         alignItems: 'center',
-        paddingVertical: 12,
-        paddingHorizontal: 14
+        padding: 16
     },
-    buyLabel: { fontSize: 15, fontWeight: '700' },
-    buySource: { fontSize: 12, marginTop: 2, fontWeight: '500' },
-    buyPrice: { fontSize: 16, fontWeight: '900' },
+    buyLabel: { fontSize: 16, fontWeight: '800' },
+    buySource: { fontSize: 12, marginTop: 2 },
+    buyPrice: { fontSize: 17, fontWeight: '900' },
+
+    divider: { height: 1 },
+
+    descriptionText: { fontSize: 15, lineHeight: 24, fontWeight: '500' },
 
     noteCard: {
         flexDirection: 'row',
-        alignItems: 'flex-start',
-        paddingHorizontal: 14,
-        paddingVertical: 12,
-        borderRadius: 12,
+        alignItems: 'center',
+        padding: 20,
+        borderRadius: 20,
         borderWidth: 1
     },
-    noteText: { fontSize: 13, fontWeight: '600', lineHeight: 18 },
+    noteText: { fontSize: 14, fontWeight: '600', lineHeight: 20 },
 
+    // BOTTOM BAR
     bottomBar: {
-        position: 'absolute',
-        bottom: 0,
-        left: 0,
-        right: 0,
         flexDirection: 'row',
-        paddingHorizontal: 16,
-        paddingVertical: 14,
-        paddingBottom: 24,
+        padding: 16,
+        paddingBottom: 32,
         borderTopWidth: 1,
-        gap: 10,
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: -4 },
-        shadowOpacity: 0.08,
-        shadowRadius: 8,
-        elevation: 8
+        gap: 12
     },
-
     actionBtn: {
-        height: 50,
-        borderRadius: 12,
+        height: 56,
+        borderRadius: 16,
         justifyContent: 'center',
         alignItems: 'center',
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.08,
-        shadowRadius: 4,
-        elevation: 2
+        flex: 1
     },
-    actionBtnText: { fontWeight: '800', fontSize: 14, letterSpacing: 0.3 },
-
+    actionBtnText: { fontWeight: '800', fontSize: 15 },
     viewSourceBtn: {
-        height: 50,
-        borderRadius: 12,
+        height: 56,
+        borderRadius: 16,
         justifyContent: 'center',
         alignItems: 'center',
-        paddingHorizontal: 16,
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.12,
-        shadowRadius: 6,
-        elevation: 3
-    },
-    viewSourceText: { fontWeight: '900', fontSize: 14, color: '#FFF', letterSpacing: 0.3 },
-    copiedToast: {
-        position: 'absolute',
-        top: 60,
-        left: 20,
-        right: 20,
-        backgroundColor: 'rgba(0, 0, 0, 0.8)',
-        padding: 12,
-        borderRadius: 12,
-        zIndex: 1000,
-        alignItems: 'center',
-        shadowColor: '#000',
+        flex: 2,
+        shadowColor: Constants.BRAND.BLUE,
         shadowOffset: { width: 0, height: 4 },
         shadowOpacity: 0.3,
         shadowRadius: 8,
-        elevation: 10
+        elevation: 4
     },
-    copiedToastText: { color: '#FFF', fontWeight: 'bold' }
+    viewSourceText: { fontWeight: '900', fontSize: 16, color: '#FFF' },
+
+    copiedToast: {
+        position: 'absolute',
+        top: 100,
+        left: 24,
+        right: 24,
+        backgroundColor: 'rgba(0,0,0,0.9)',
+        padding: 16,
+        borderRadius: 16,
+        zIndex: 9999,
+        alignItems: 'center'
+    },
+    copiedToastText: { color: '#FFF', fontWeight: '800' },
+
+    // HERO DISCOUNT STYLES
+    heroDiscountCard: {
+        borderRadius: 24,
+        padding: 24,
+        marginBottom: 24,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 8 },
+        shadowOpacity: 0.2,
+        shadowRadius: 16,
+        elevation: 8
+    },
+    heroDiscountBadge: { alignItems: 'center', marginBottom: 20 },
+    heroDiscountPercent: { fontSize: 56, fontWeight: '900', color: '#FFF', letterSpacing: -2 },
+    heroDiscountLabel: { fontSize: 18, fontWeight: '800', color: '#FFF', letterSpacing: 4, marginTop: -8 },
+    heroSavingsRow: {
+        alignItems: 'center',
+        marginBottom: 24,
+        paddingBottom: 20,
+        borderBottomWidth: 1,
+        borderBottomColor: 'rgba(255,255,255,0.2)'
+    },
+    heroSavingsLabel: { fontSize: 15, fontWeight: '700', color: 'rgba(255,255,255,0.9)', marginBottom: 8 },
+    heroSavingsAmount: { fontSize: 36, fontWeight: '900', color: '#FFF' },
+    heroPriceRow: { flexDirection: 'row', alignItems: 'center' },
+    heroPriceDivider: { width: 1, height: 48, backgroundColor: 'rgba(255,255,255,0.2)', marginHorizontal: 24 },
+    heroNowLabel: { fontSize: 12, fontWeight: '800', color: 'rgba(255,255,255,0.8)', marginBottom: 4, textTransform: 'uppercase' },
+    heroNowPrice: { fontSize: 24, fontWeight: '900', color: '#FFF' },
+    heroWasLabel: { fontSize: 12, fontWeight: '800', color: 'rgba(255,255,255,0.7)', marginBottom: 4, textTransform: 'uppercase' },
+    heroWasPrice: { fontSize: 20, fontWeight: '700', color: 'rgba(255,255,255,0.8)', textDecorationLine: 'line-through' }
 });
 
 export default ProductDetailScreen;

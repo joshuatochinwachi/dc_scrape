@@ -6,11 +6,11 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { SavedContext } from '../context/SavedContext';
 import { UserContext } from '../context/UserContext';
 import Constants from '../Constants';
-import { registerForPushNotifications, requestNotificationPermissions } from '../services/PushNotificationService';
 
-const ProfileScreen = () => {
+
+const ProfileScreen = ({ navigation }) => {
     const { savedProducts } = useContext(SavedContext);
-    const { user, isDarkMode, toggleTheme, logout } = useContext(UserContext);
+    const { user, isDarkMode, toggleTheme, logout, telegramLinked, isPremiumTelegram, premiumUntil, checkTelegramStatus, selectedRegion, updateRegion } = useContext(UserContext);
     const brand = Constants.BRAND;
 
     const colors = isDarkMode ? {
@@ -30,17 +30,14 @@ const ProfileScreen = () => {
     };
 
     // State Management
-    const [notificationsEnabled, setNotificationsEnabled] = useState(false);
-    const [country, setCountry] = useState('US');
-    const [telegramLinked, setTelegramLinked] = useState(false);
+    // const [country, setCountry] = useState('US'); // REMOVED LOCAL STATE
     const [telegramModalVisible, setTelegramModalVisible] = useState(false);
     const [telegramLinkKey, setTelegramLinkKey] = useState(null);
     const [isGeneratingKey, setIsGeneratingKey] = useState(false);
     const [isCheckingStatus, setIsCheckingStatus] = useState(false);
     const [countryModalVisible, setCountryModalVisible] = useState(false);
-    const [isPremium, setIsPremium] = useState(false);
-    const [premiumUntil, setPremiumUntil] = useState(null);
     const userId = user?.id || 'guest-user';
+
 
     // Calculate generic stats
     const savedCount = savedProducts.length;
@@ -93,20 +90,13 @@ const ProfileScreen = () => {
         try {
             console.log('[TELEGRAM] Checking link status...');
 
-            const response = await fetch(
-                `${Constants.API_BASE_URL}/v1/user/telegram/link-status?user_id=${userId}`,
-                { method: 'GET', headers: { 'Content-Type': 'application/json' } }
-            );
-
-            const data = await response.json();
-            if (data.success && data.linked) {
-                setTelegramLinked(true);
-                setIsPremium(data.is_premium || false);
-                setPremiumUntil(data.premium_until);
+            const result = await checkTelegramStatus();
+            if (result && result.linked) {
                 setTelegramLinkKey(null);
             } else {
                 Alert.alert('⏳ Not Linked Yet', 'Send the command to the bot first, then try again.');
             }
+
         } catch (error) {
             console.error('[TELEGRAM] Error:', error);
             Alert.alert('Error', `Failed to check status: ${error.message}`);
@@ -156,28 +146,7 @@ const ProfileScreen = () => {
         );
     };
 
-    const handleNotificationsToggle = async (value) => {
-        if (value) {
-            // Enable notifications - request permissions
-            const hasPermission = await requestNotificationPermissions();
-            if (hasPermission) {
-                setNotificationsEnabled(true);
-                Alert.alert('Notifications Enabled', 'You will now receive push notifications for new deals!');
-                console.log('[NOTIFICATIONS] Enabled');
-            } else {
-                Alert.alert(
-                    'Permission Required',
-                    'Please enable notifications in your system settings to receive deal alerts.'
-                );
-                console.log('[NOTIFICATIONS] Permission denied');
-            }
-        } else {
-            // Disable notifications
-            setNotificationsEnabled(false);
-            Alert.alert('Notifications Disabled', 'You will not receive push notifications.');
-            console.log('[NOTIFICATIONS] Disabled');
-        }
-    };
+
     const StatBox = ({ label, value }) => (
         <View style={[styles.statBox, { backgroundColor: colors.card, borderBottomColor: colors.border }]}>
             <Text style={[styles.statValue, { color: colors.text }]}>{value}</Text>
@@ -244,8 +213,9 @@ const ProfileScreen = () => {
                     </View>
                     <Text style={styles.userName}>{user?.email || 'HollowScan User'}</Text>
                     <View style={styles.planBadge}>
-                        <Text style={styles.planText}>👑 {user?.isPremium ? 'Premium' : 'Free'} Plan</Text>
+                        <Text style={styles.planText}>👑 {(user?.isPremium || isPremiumTelegram) ? 'Premium' : 'Free'} Plan</Text>
                     </View>
+
                     <TouchableOpacity style={styles.upgradeBtn}>
                         <LinearGradient
                             colors={[brand.CYAN, brand.BLUE]}
@@ -268,12 +238,7 @@ const ProfileScreen = () => {
                 {/* NOTIFICATION & PREFERENCES */}
                 <SectionHeader title="SETTINGS" />
                 <View style={[styles.group, { backgroundColor: colors.groupBg, borderColor: colors.border }]}>
-                    <SettingRowWithSwitch
-                        icon="🔔"
-                        label="Push Notifications"
-                        value={notificationsEnabled}
-                        onValueChange={handleNotificationsToggle}
-                    />
+
                     <SettingRowWithSwitch
                         icon="🌙"
                         label="Dark Mode"
@@ -283,7 +248,7 @@ const ProfileScreen = () => {
                     <SettingRow
                         icon="🌍"
                         label="Preferred Country"
-                        value={country}
+                        value={selectedRegion === 'USA Stores' ? 'US' : selectedRegion === 'UK Stores' ? 'UK' : 'CA'}
                         status="Region for deals"
                         onPress={() => setCountryModalVisible(true)}
                     />
@@ -297,20 +262,22 @@ const ProfileScreen = () => {
                         label="Telegram Bot"
                         value={telegramLinked ? '✓ Linked' : 'Not linked'}
                         status={
-                            isPremium
+                            isPremiumTelegram
                                 ? `👑 Premium until ${new Date(premiumUntil).toLocaleDateString()}`
                                 : (telegramLinked ? 'Receiving notifications' : 'Connect for alerts')
                         }
                         onPress={() => setTelegramModalVisible(true)}
                     />
+
                 </View>
 
                 {/* ACCOUNT */}
                 <SectionHeader title="ACCOUNT" />
                 <View style={[styles.group, { backgroundColor: colors.groupBg, borderColor: colors.border }]}>
                     <SettingRow icon="👤" label="Profile Information" onPress={() => { }} />
-                    <SettingRow icon="🔒" label="Change Password" onPress={() => { }} />
-                    <SettingRow icon="✉️" label="Email Verification" value="Verified" />
+                    <SettingRow icon="🔒" label="Change Password" onPress={() => navigation.navigate('ChangePassword')} />
+                    <SettingRow icon="✉️" label="Email Verification" value={user?.email_verified ? "Verified" : "Unverified"} />
+
                 </View>
 
                 {/* SUPPORT */}
@@ -442,10 +409,11 @@ const ProfileScreen = () => {
                                     <View style={styles.successContainer}>
                                         <Text style={styles.successEmoji}>🎉</Text>
                                         <Text style={styles.successText}>Connected!</Text>
-                                        {isPremium && (
+                                        {isPremiumTelegram && (
                                             <Text style={{ fontSize: 12, color: '#D97706', marginTop: 5 }}>👑 Premium Status Synced</Text>
                                         )}
                                     </View>
+
 
                                     <View style={styles.benefitsContainer}>
                                         <Text style={styles.benefitTitle}>Getting notifications for:</Text>
@@ -486,23 +454,28 @@ const ProfileScreen = () => {
                     <View style={styles.centeredView}>
                         <View style={[styles.modalView, { width: '80%', maxWidth: 300 }]}>
                             <Text style={styles.modalTitle}>Select Country</Text>
-                            {['US', 'UK', 'CA'].map(c => (
+                            <Text style={styles.modalTitle}>Select Country</Text>
+                            {[
+                                { id: 'USA Stores', code: 'US', label: '🇺🇸 United States' },
+                                { id: 'UK Stores', code: 'UK', label: '🇬🇧 United Kingdom' },
+                                { id: 'Canada Stores', code: 'CA', label: '🇨🇦 Canada' }
+                            ].map(c => (
                                 <TouchableOpacity
-                                    key={c}
+                                    key={c.code}
                                     style={[
                                         styles.countryOption,
-                                        country === c && styles.countryOptionActive
+                                        selectedRegion === c.id && styles.countryOptionActive
                                     ]}
                                     onPress={() => {
-                                        setCountry(c);
+                                        updateRegion(c.id);
                                         setCountryModalVisible(false);
                                     }}
                                 >
                                     <Text style={[
                                         styles.countryOptionText,
-                                        country === c && styles.countryOptionTextActive
+                                        selectedRegion === c.id && styles.countryOptionTextActive
                                     ]}>
-                                        {c === 'US' ? '🇺🇸 United States' : c === 'UK' ? '🇬🇧 United Kingdom' : '🇨🇦 Canada'}
+                                        {c.label}
                                     </Text>
                                 </TouchableOpacity>
                             ))}

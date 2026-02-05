@@ -7,8 +7,9 @@ import Constants from '../Constants';
 
 const SavedScreen = ({ navigation }) => {
     const { savedProducts } = useContext(SavedContext);
-    const { isDarkMode } = useContext(UserContext);
+    const { isDarkMode, trackProductView, isPremium: userIsPremium } = useContext(UserContext);
     const brand = Constants.BRAND;
+
 
     const colors = isDarkMode ? {
         bg: brand.DARK_BG,
@@ -24,14 +25,28 @@ const SavedScreen = ({ navigation }) => {
         border: 'rgba(0,0,0,0.05)',
     };
 
+    const handleProductPress = async (item) => {
+        if (userIsPremium) {
+            navigation.navigate('ProductDetail', { product: item });
+            return;
+        }
+
+        const result = await trackProductView(item.id);
+        if (result.allowed) {
+            navigation.navigate('ProductDetail', { product: item });
+        }
+    };
+
     const renderItem = ({ item }) => {
+
         const data = item.product_data || {};
         return (
             <TouchableOpacity
                 style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}
-                onPress={() => navigation.navigate('ProductDetail', { product: item })}
+                onPress={() => handleProductPress(item)}
             >
-                <Image source={{ uri: data.thumbnail || 'https://via.placeholder.com/150' }} style={styles.image} />
+
+                <Image source={{ uri: data.image || data.thumbnail || 'https://via.placeholder.com/150' }} style={styles.image} />
                 <View style={styles.cardContent}>
                     <Text style={[styles.title, { color: colors.text }]} numberOfLines={2}>{data.title}</Text>
                     <View style={styles.priceRow}>

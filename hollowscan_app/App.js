@@ -19,6 +19,12 @@ import ProfileScreen from './screens/ProfileScreen';
 import SplashScreen from './screens/SplashScreen';
 import LoginScreen from './screens/LoginScreen';
 import SignupScreen from './screens/SignupScreen';
+import VerificationScreen from './screens/VerificationScreen';
+import ForgotPasswordScreen from './screens/ForgotPasswordScreen';
+import ChangePasswordScreen from './screens/ChangePasswordScreen';
+import DailyLimitModal from './components/DailyLimitModal';
+
+
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
@@ -29,6 +35,7 @@ function AuthNavigator() {
     <AuthStack.Navigator screenOptions={{ headerShown: false }}>
       <AuthStack.Screen name="Login" component={LoginScreen} />
       <AuthStack.Screen name="Signup" component={SignupScreen} />
+      <AuthStack.Screen name="ForgotPassword" component={ForgotPasswordScreen} />
     </AuthStack.Navigator>
   );
 }
@@ -103,16 +110,25 @@ const NavigationRoot = ({ showSplash, setShowSplash, linking }) => {
           <StatusBar style={isDarkMode ? "light" : "dark"} />
           <Stack.Navigator screenOptions={{ headerShown: false }}>
             {user ? (
-              <>
-                <Stack.Screen name="Root" component={TabNavigator} />
-                <Stack.Screen name="ProductDetail" component={ProductDetailScreen} options={{ presentation: 'card' }} />
-              </>
+              !user.email_verified ? (
+                <Stack.Screen name="Verification" component={VerificationScreen} />
+              ) : (
+                <>
+                  <Stack.Screen name="Root" component={TabNavigator} />
+                  <Stack.Screen name="ProductDetail" component={ProductDetailScreen} options={{ presentation: 'card' }} />
+                  <Stack.Screen name="ChangePassword" component={ChangePasswordScreen} />
+                  <Stack.Screen name="ForgotPassword" component={ForgotPasswordScreen} />
+                </>
+              )
             ) : (
               <Stack.Screen name="Auth" component={AuthNavigator} />
             )}
+
           </Stack.Navigator>
+          <DailyLimitModal />
         </NavigationContainer>
       )}
+
     </SafeAreaProvider>
   );
 };
@@ -138,6 +154,7 @@ export default function App() {
           screens: {
             Login: 'login',
             Signup: 'signup',
+            ForgotPassword: 'forgot-password',
           }
         },
         ProductDetail: 'product/:productId',

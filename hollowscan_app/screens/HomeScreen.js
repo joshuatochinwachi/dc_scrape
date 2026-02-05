@@ -14,6 +14,8 @@ import {
     TextInput,
     Linking,
     Animated,
+    Keyboard,
+    Alert
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -42,7 +44,7 @@ const getRelativeTime = (dateString) => {
 
 const HomeScreen = () => {
     const navigation = useNavigation();
-    const { isDarkMode } = useContext(UserContext);
+    const { user, isDarkMode, getRemainingViews, trackProductView, isPremium: userIsPremium, telegramLinked, checkTelegramStatus, selectedRegion, updateRegion } = useContext(UserContext);
 
     // CONFIG
     const LIMIT = 10;
@@ -56,8 +58,8 @@ const HomeScreen = () => {
     ];
 
     // STATE
-    const [selectedRegion, setSelectedRegion] = useState('USA Stores');
     const [selectedCategories, setSelectedCategories] = useState(['ALL']); // Main category selection
+    const [viewRegion, setViewRegion] = useState(selectedRegion || 'USA Stores'); // Local view state
     const [searchQuery, setSearchQuery] = useState('');
     const [isSearching, setIsSearching] = useState(false);
     const [isFilterVisible, setFilterVisible] = useState(false);
@@ -74,7 +76,14 @@ const HomeScreen = () => {
     const [isPremium, setIsPremium] = useState(false);
     const [totalAvailable, setTotalAvailable] = useState(0);
 
+    const [countdown, setCountdown] = useState(''); // Keep local if used for UI display in feed, but modal uses context
+
+
+
+
     // BRAND
+
+
     const brand = Constants.BRAND;
     const colors = isDarkMode ? {
         bg: brand.DARK_BG,
@@ -100,17 +109,38 @@ const HomeScreen = () => {
         tabInactiveBg: '#FFFFFF'
     };
 
-    // INITIAL FETCH
+    // INITIAL FETCH & CONTEXT SYNC
+    useEffect(() => {
+        if (selectedRegion) {
+            setViewRegion(selectedRegion); // Update view if preference changes (e.g. from Profile)
+        }
+    }, [selectedRegion]);
+
     useEffect(() => {
         fetchInitialData();
-    }, [selectedRegion, selectedCategories]);
+    }, [viewRegion, selectedCategories]); // Fetch based on viewRegion
+
+    // NO LOCAL TIMER NEEDED - Context handles it
+
 
     // HANDLERS
     const handleSearch = async (query = searchQuery) => {
-        if (!query || !query.trim()) return;
-        setIsSearching(true);
-        await fetchAlerts(0, true, query);
-        setIsSearching(false);
+
+
+        // Alert.alert("Debug", "Search Triggered: " + query);
+        Keyboard.dismiss();
+        if (!query || !query.trim()) {
+            // Alert.alert("Debug", "Empty Query");
+            return;
+        }
+        try {
+            setIsLoading(true);
+            await fetchAlerts(0, true, query);
+            setIsLoading(false);
+        } catch (e) {
+            Alert.alert("Error", "Search error: " + e.message);
+            setIsLoading(false);
+        }
     };
 
     const clearSearch = () => {
@@ -118,13 +148,32 @@ const HomeScreen = () => {
         fetchAlerts(0, true, '');
     };
 
-    // SETUP NOTIFICATIONS & LIVE UPDATES
+    const handleProductPress = async (product) => {
+        // Check if user is premium - bypass limit
+        if (userIsPremium) {
+            navigation.navigate('ProductDetail', { product });
+            return;
+        }
+
+        // Check daily limit for free users
+        const result = await trackProductView(product.id);
+
+        if (result.allowed) {
+            // Update quota display
+            const remaining = getRemainingViews();
+            setQuota({ used: 4 - remaining, limit: 4 });
+            navigation.navigate('ProductDetail', { product });
+        }
+
+    };
+
+    // SETUP LIVE UPDATES
     useEffect(() => {
-        setupNotificationHandler();
         LiveProductService.resetLastProductTime();
+
         LiveProductService.startPolling({
             userId: USER_ID,
-            country: selectedRegion,
+            country: viewRegion,
             category: selectedCategories.includes('ALL') ? 'ALL' : selectedCategories[0],
             onlyNew: true,
             search: searchQuery,
@@ -149,7 +198,7 @@ const HomeScreen = () => {
             unsubscribe();
             LiveProductService.stopPolling();
         };
-    }, [selectedRegion, selectedCategories, searchQuery]);
+    }, [viewRegion, selectedCategories, searchQuery]);
 
     const fetchInitialData = async () => {
         setIsLoading(true);
@@ -188,7 +237,7 @@ const HomeScreen = () => {
         try {
             const activeSearch = overrideSearch !== null ? overrideSearch : searchQuery;
             const catParam = selectedCategories.includes('ALL') ? 'ALL' : selectedCategories[0] || 'ALL';
-            let url = `${Constants.API_BASE_URL}/v1/feed?user_id=${USER_ID}&region=${encodeURIComponent(selectedRegion)}&category=${encodeURIComponent(catParam)}&offset=${currentOffset}&limit=${LIMIT}`;
+            let url = `${Constants.API_BASE_URL}/v1/feed?user_id=${USER_ID}&region=${encodeURIComponent(viewRegion)}&category=${encodeURIComponent(catParam)}&offset=${currentOffset}&limit=${LIMIT}`;
 
             if (activeSearch && activeSearch.trim()) {
                 url += `&search=${encodeURIComponent(activeSearch.trim())}`;
@@ -221,6 +270,8 @@ const HomeScreen = () => {
                 setHasMore(false);
             }
         } catch (e) {
+            console.error(e);
+            Alert.alert("Fetch Error", e.message);
             setHasMore(false);
         }
     };
@@ -235,6 +286,8 @@ const HomeScreen = () => {
         }).catch(() => setIsLoadingMore(false));
     };
 
+
+
     const onRefresh = async () => {
         setIsRefreshing(true);
         await fetchInitialData();
@@ -244,14 +297,12 @@ const HomeScreen = () => {
     // --- HELPERS ---
     const formatPriceDisplay = (value, region) => {
         if (!value || isNaN(value) || value === 0) {
-            if (region === 'UK Stores') return '£0.00';
-            if (region === 'Canada Stores') return 'CAD 0.00';
-            return '$0.00';
+            const symbol = region === 'UK Stores' ? '£' : region === 'Canada Stores' ? 'CAD ' : '$';
+            return `${symbol}0.00`;
         }
 
         const num = parseFloat(value);
 
-        // Custom formatting for CAD to meet user requirement "CAD 74.00"
         if (region === 'Canada Stores') {
             const usd = (num * 0.73).toFixed(0);
             return `CAD ${num.toFixed(2)} (USD ${usd})`;
@@ -263,7 +314,6 @@ const HomeScreen = () => {
             minimumFractionDigits: 2
         }).format(num);
 
-        // Add USD equivalent for UK
         if (region === 'UK Stores') {
             const usd = (num * 1.25).toFixed(0);
             return `${formatted} (USD ${usd})`;
@@ -272,29 +322,89 @@ const HomeScreen = () => {
         return formatted;
     };
 
+    const parsePriceData = (data, region) => {
+        let price = 0;
+        let wasPrice = 0;
+        let discountPercent = 0;
+
+        // Try to handle various discount price formats
+        const rawPriceString = String(data.price || '');
+
+        // Pattern 1: "Was: 29.99 Now: 19.99" (robust for currency symbols/spaces)
+        let match = rawPriceString.match(/Was[:\s]+[^\d\.]*([\d.]+).*?Now[:\s]+[^\d\.]*([\d.]+)/i);
+        if (match) {
+            wasPrice = parseFloat(match[1]);
+            price = parseFloat(match[2]);
+        } else {
+            // Pattern 2: "Now: 19.99 Was: 29.99" (reversed)
+            match = rawPriceString.match(/Now[:\s]+[^\d\.]*([\d.]+).*?Was[:\s]+[^\d\.]*([\d.]+)/i);
+            if (match) {
+                price = parseFloat(match[1]);
+                wasPrice = parseFloat(match[2]);
+            } else {
+                // Pattern 3: Separate fields or plain number
+                price = parseFloat(String(data.price || '0').replace(/[^0-9.]/g, '')) || 0;
+                wasPrice = parseFloat(String(data.was_price || '0').replace(/[^0-9.]/g, '')) || 0;
+            }
+        }
+
+        // FALLBACK: If price is still 0, check details array for "PRICING INFORMATION"
+        if (price === 0 && data.details && Array.isArray(data.details)) {
+            const pricingDetail = data.details.find(d =>
+                (d.label || '').toLowerCase().includes('pricing') ||
+                (d.label || '').toLowerCase().includes('price')
+            );
+
+            if (pricingDetail && pricingDetail.value) {
+                const detailString = String(pricingDetail.value);
+                // Try Pattern 1 
+                let match = detailString.match(/Was[:\s]+[^\d\.]*([\d.]+).*?Now[:\s]+[^\d\.]*([\d.]+)/i);
+                if (match) {
+                    wasPrice = parseFloat(match[1]);
+                    price = parseFloat(match[2]);
+                } else {
+                    // Try Pattern 2
+                    match = detailString.match(/Now[:\s]+[^\d\.]*([\d.]+).*?Was[:\s]+[^\d\.]*([\d.]+)/i);
+                    if (match) {
+                        price = parseFloat(match[1]);
+                        wasPrice = parseFloat(match[2]);
+                    }
+                }
+            }
+        }
+
+        const resell = parseFloat(String(data.resell || '0').replace(/[^0-9.]/g, '')) || 0;
+
+        if (wasPrice > price && price > 0) {
+            discountPercent = Math.round(((wasPrice - price) / wasPrice) * 100);
+        }
+
+        return { price, wasPrice, resell, discountPercent };
+    };
+
     const currentSubcategories = Array.from(new Set(['ALL', ...(dynamicCategories[selectedRegion] || [])]));
     const { toggleSave, isSaved } = useContext(SavedContext);
 
     // --- ANIMATED PRODUCT CARD COMPONENT ---
     const ProductCard = ({ item }) => {
-        if (!item) return null;
         const data = item.product_data || {};
-        const catName = (item.category_name || "PROMO").toUpperCase();
-        const resaleValRaw = String(data.resell || '0').replace(/[^0-9.]/g, '');
-        const priceValRaw = String(data.price || '0').replace(/[^0-9.]/g, '');
+        const catName = item.category_name || 'General';
+        const { price: priceVal, wasPrice: wasPriceVal, resell: resellVal, discountPercent } = parsePriceData(data, item.region);
 
-        const resaleVal = parseFloat(resaleValRaw);
-        const priceVal = parseFloat(priceValRaw);
-
-        // Filter out items with 0 price (if not already filtered by API)
-        if (priceVal === 0 && (!resaleVal || resaleVal === 0)) return null;
-
-        const hasResell = !isNaN(resaleVal) && resaleVal > 0;
+        const hasResell = resellVal > 0;
+        const hasDiscount = discountPercent > 0;
         const saved = isSaved(item.id);
 
+        // Filter out ONLY if missing image, price AND links (as per user request)
+        const hasImage = !!data.image;
+        const hasLinks = !!(data.buy_url || (data.links && Object.values(data.links).flat().length > 0));
+        const hasAnyPrice = priceVal > 0 || resellVal > 0 || wasPriceVal > 0;
+
+        if (!hasImage && !hasLinks && !hasAnyPrice) return null;
+
         // Calculate ROI percentage
-        const roiPercent = hasResell && priceVal > 0
-            ? Math.round(((resaleVal - priceVal) / priceVal) * 100)
+        const roiPercent = (hasResell && priceVal > 0)
+            ? Math.round(((resellVal - priceVal) / priceVal) * 100)
             : 0;
 
         // ANIMATION
@@ -317,13 +427,14 @@ const HomeScreen = () => {
         };
 
         const displayPrice = formatPriceDisplay(priceVal, item.region);
-        const displayResale = hasResell ? formatPriceDisplay(resaleVal, item.region) : null;
+        const displayWasPrice = wasPriceVal > 0 ? formatPriceDisplay(wasPriceVal, item.region) : null;
+        const displayResale = hasResell ? formatPriceDisplay(resellVal, item.region) : null;
 
         return (
             <Animated.View style={{ transform: [{ scale }] }}>
                 <TouchableOpacity
                     style={[styles.card, { borderColor: colors.border, backgroundColor: colors.card }]}
-                    onPress={() => navigation.navigate('ProductDetail', { product: item })}
+                    onPress={() => handleProductPress(item)}
                     onPressIn={handlePressIn}
                     onPressOut={handlePressOut}
                     activeOpacity={0.95}
@@ -334,6 +445,17 @@ const HomeScreen = () => {
                             source={{ uri: data.image || 'https://via.placeholder.com/400' }}
                             style={styles.cardImage}
                         />
+                        {/* PREMIUM DISCOUNT BADGE WITH GRADIENT */}
+                        {hasDiscount && (
+                            <LinearGradient
+                                colors={['#FF6B6B', '#EE5A6F']}
+                                start={{ x: 0, y: 0 }}
+                                end={{ x: 1, y: 1 }}
+                                style={styles.discountBadge}
+                            >
+                                <Text style={styles.discountBadgeText}>-{discountPercent}%</Text>
+                            </LinearGradient>
+                        )}
                         {/* HEART BUTTON */}
                         <TouchableOpacity
                             onPress={(e) => { e.stopPropagation(); toggleSave(item); }}
@@ -350,22 +472,50 @@ const HomeScreen = () => {
                             {data.title || 'Hollowscan Product'}
                         </Text>
 
-                        {/* PRICE ROW */}
+                        {/* PRICE ROW - PREMIUM E-COMMERCE LAYOUT */}
                         <View style={styles.priceRow}>
-                            <View style={styles.priceLeft}>
-                                {hasResell && (
-                                    <Text style={[styles.retailPrice, { color: colors.textSecondary }]}>
-                                        {displayPrice}
-                                    </Text>
-                                )}
-                                <Text style={[styles.resalePrice, { color: '#10B981' }]}>
-                                    {hasResell ? displayResale : displayPrice}
-                                </Text>
-                            </View>
-                            {roiPercent > 0 && (
-                                <View style={styles.roiBadge}>
-                                    <Text style={styles.roiBadgeText}>+{roiPercent}%</Text>
+                            {hasDiscount ? (
+                                /* PREMIUM DISCOUNT LAYOUT (E-COMMERCE STYLE) */
+                                <View style={{ flex: 1 }}>
+                                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                                        <View style={{ flexDirection: 'row', alignItems: 'baseline' }}>
+                                            <Text style={[styles.nowPrice, { color: '#10B981', fontWeight: '700', fontSize: 18 }]}>
+                                                {displayPrice}
+                                            </Text>
+                                            <Text style={[styles.wasPrice, { color: colors.textSecondary, textDecorationLine: 'line-through', fontSize: 13, marginLeft: 8 }]}>
+                                                {displayWasPrice}
+                                            </Text>
+                                        </View>
+                                        {/* YOU SAVE BADGE */}
+                                        <View style={[styles.savingsBadge, { backgroundColor: '#FBBF2415' }]}>
+                                            <Text style={[styles.savingsText, { color: '#D97706' }]}>
+                                                Save {formatPriceDisplay(wasPriceVal - priceVal, item.region)}
+                                            </Text>
+                                        </View>
+                                    </View>
                                 </View>
+                            ) : (
+                                /* FLIP DEAL / REGULAR LAYOUT */
+                                <>
+                                    <View style={styles.priceLeft}>
+                                        <Text style={[styles.resalePrice, { color: colors.text }]}>
+                                            {priceVal > 0 ? `Buy: ${displayPrice}` : 'Check Price'}
+                                        </Text>
+                                    </View>
+
+                                    {hasResell && (
+                                        <View style={styles.priceRight}>
+                                            <Text style={[styles.resalePrice, { color: '#10B981', textAlign: 'right' }]}>
+                                                Market: {displayResale}
+                                            </Text>
+                                            {roiPercent > 0 && (
+                                                <View style={[styles.roiBadgeSmall, { backgroundColor: brand.BLUE + '15' }]}>
+                                                    <Text style={[styles.roiBadgeText, { color: brand.BLUE }]}>+{roiPercent}% ROI</Text>
+                                                </View>
+                                            )}
+                                        </View>
+                                    )}
+                                </>
                             )}
                         </View>
 
@@ -401,136 +551,144 @@ const HomeScreen = () => {
 
     const renderProductCard = ({ item }) => <ProductCard item={item} />;
 
-    // --- STICKY HEADER ---
-    const StickyHeader = () => (
-        <View style={[styles.stickyContainer, { backgroundColor: colors.bg }]}>
-            {/* TOP ROW: SEARCH + LOGO + QUOTA */}
-            <View style={styles.topRow}>
-                <View style={styles.logoRow}>
-                    <Image source={require('../assets/top-left-logo.png')} style={{ width: 28, height: 28, borderRadius: 8 }} />
-                </View>
-
-                <View style={[styles.searchBar, { backgroundColor: colors.input, borderColor: colors.border }]}>
-                    <Text style={{ fontSize: 14, marginRight: 8 }}>🔍</Text>
-                    <TextInput
-                        placeholder="Search products..."
-                        placeholderTextColor={colors.textSecondary}
-                        style={[styles.searchInput, { color: colors.text }]}
-                        value={searchQuery}
-                        onChangeText={setSearchQuery}
-                        onSubmitEditing={() => handleSearch()}
-                        returnKeyType="search"
-                    />
-                    {searchQuery ? (
-                        <TouchableOpacity onPress={clearSearch}>
-                            <Text style={{ color: colors.textSecondary, fontSize: 16 }}>✕</Text>
-                        </TouchableOpacity>
-                    ) : null}
-                </View>
-
-                <LinearGradient
-                    colors={[brand.PURPLE + '20', brand.BLUE + '10']}
-                    style={styles.quotaPill}
-                >
-                    <Text style={[styles.quotaText, { color: brand.PURPLE }]}>{quota.limit - quota.used}</Text>
-                    <Text style={{ fontSize: 10 }}>⚡</Text>
-                </LinearGradient>
-            </View>
-
-            {/* ROW 2: CONTROLS (Common line for Regions and Categories) */}
-            <View style={styles.controlsRow}>
-                {/* COMPACT REGION SELECTOR */}
-                <View style={styles.regionTabs}>
-                    {regions.map(r => {
-                        const isActive = selectedRegion === r.id;
-                        return (
-                            <TouchableOpacity
-                                key={r.id}
-                                onPress={() => setSelectedRegion(r.id)}
-                                style={[
-                                    styles.regionTab,
-                                    isActive && { backgroundColor: isDarkMode ? '#333' : '#FFF', borderColor: brand.BLUE, borderWidth: 1 }
-                                ]}
-                            >
-                                <Text style={{ fontSize: 16 }}>{r.flag}</Text>
-                                <Text style={[
-                                    styles.regionTabText,
-                                    { color: isActive ? colors.text : colors.textSecondary, fontWeight: isActive ? '900' : '600' }
-                                ]}>
-                                    {r.label}
-                                </Text>
-                            </TouchableOpacity>
-                        );
-                    })}
-                </View>
-
-                <View style={[styles.verticalDivider, { backgroundColor: colors.border }]} />
-
-                <TouchableOpacity
-                    onPress={() => setFilterVisible(true)}
-                    activeOpacity={0.7}
-                    style={[styles.filterBtn, { backgroundColor: colors.card, borderColor: colors.border }]}
-                >
-                    <Text style={{ fontSize: 16, marginRight: 6 }}>⚡</Text>
-                    <Text style={[styles.filterBtnText, { color: colors.text }]}>
-                        {selectedCategories.includes('ALL')
-                            ? 'All Categories'
-                            : `${selectedCategories.length} Selected`}
-                    </Text>
-                    <Text style={{ fontSize: 12, marginLeft: 6, color: brand.BLUE }}>▼</Text>
-                </TouchableOpacity>
-            </View>
-        </View>
-    );
 
     return (
+
         <SafeAreaView edges={['top']} style={[styles.container, { backgroundColor: colors.bg }]}>
+
             <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
 
             {/* STICKY HEADER AT TOP */}
-            <StickyHeader />
-
-            <FlatList
-                data={alerts}
-                keyExtractor={item => String(item.id)}
-                renderItem={renderProductCard}
-                contentContainerStyle={[styles.feedScroll, { paddingTop: 10 }]} // Add top padding for spacing from header
-                showsVerticalScrollIndicator={false}
-                onRefresh={onRefresh}
-                refreshing={isRefreshing}
-                onEndReached={handleLoadMore}
-                onEndReachedThreshold={0.5}
-                ListFooterComponent={() => {
-                    if (isLoadingMore) return <ActivityIndicator color={brand.BLUE} style={{ marginVertical: 20 }} />;
-                    if (!isPremium && alerts.length >= 4) {
-                        // Compact Paywall for Horizontal Layout
-                        return (
-                            <View style={[styles.paywallCompact, { backgroundColor: colors.card, borderColor: colors.border }]}>
-                                <Text style={[styles.paywallText, { color: colors.text }]}>
-                                    🔒 <Text style={{ fontWeight: 'bold' }}>Unlock all {totalAvailable}+ deals</Text>
-                                </Text>
-                                <TouchableOpacity style={{ backgroundColor: brand.BLUE, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20 }}>
-                                    <Text style={{ color: '#FFF', fontWeight: 'bold', fontSize: 12 }}>UPGRADE</Text>
-                                </TouchableOpacity>
-                            </View>
-                        );
-                    }
-                    return <View style={{ height: 40 }} />;
-                }}
-                ListEmptyComponent={!isLoading ? (
-                    <View style={styles.emptyContainer}>
-                        <Text style={{ color: colors.textSecondary, fontSize: 14, textAlign: 'center' }}>
-                            {searchQuery ? 'No results found.' : `No alerts in this region.`}
-                        </Text>
+            <View style={[styles.stickyContainer, { backgroundColor: colors.bg }]}>
+                {/* TOP ROW: SEARCH + LOGO + QUOTA */}
+                <View style={styles.topRow}>
+                    <View style={styles.logoRow}>
+                        <Image source={require('../assets/top-left-logo.png')} style={{ width: 28, height: 28, borderRadius: 8 }} />
                     </View>
-                ) : null}
-            />
 
-            {isLoading && (
-                <View style={styles.loadingOverlay}>
+                    <View style={[styles.searchBar, { backgroundColor: colors.input, borderColor: colors.border }]}>
+                        <TouchableOpacity onPress={() => handleSearch()} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }} style={{ backgroundColor: brand.BLUE, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8, marginRight: 8 }}>
+                            <Text style={{ fontSize: 16, color: '#FFF', fontWeight: 'bold' }}>GO</Text>
+                        </TouchableOpacity>
+                        <TextInput
+                            placeholder="Search products..."
+                            placeholderTextColor={colors.textSecondary}
+                            style={[styles.searchInput, { color: colors.text }]}
+                            value={searchQuery}
+                            onChangeText={setSearchQuery}
+                            onSubmitEditing={() => handleSearch()}
+                            returnKeyType="search"
+                        />
+                        {searchQuery ? (
+                            <TouchableOpacity onPress={clearSearch}>
+                                <Text style={{ color: colors.textSecondary, fontSize: 16 }}>✕</Text>
+                            </TouchableOpacity>
+                        ) : null}
+                    </View>
+
+                    <LinearGradient
+                        colors={[brand.PURPLE + '20', brand.BLUE + '10']}
+                        style={styles.quotaPill}
+                    >
+                        <Text style={[styles.quotaText, { color: brand.PURPLE }]}>
+                            {userIsPremium ? '∞' : getRemainingViews()}
+                        </Text>
+                        <Text style={{ fontSize: 10 }}>⚡</Text>
+                    </LinearGradient>
+                </View>
+
+                {/* ROW 2: CONTROLS (Common line for Regions and Categories) */}
+                <View style={styles.controlsRow}>
+                    {/* COMPACT REGION SELECTOR */}
+                    <View style={styles.regionTabs}>
+                        {regions.map(r => {
+                            const isActive = viewRegion === r.id; // Use local viewRegion
+                            return (
+                                <TouchableOpacity
+                                    key={r.id}
+                                    onPress={() => setViewRegion(r.id)} // Only update local viewRegion
+                                    style={[
+                                        styles.regionTab,
+                                        isActive && { backgroundColor: isDarkMode ? '#333' : '#FFF', borderColor: brand.BLUE, borderWidth: 1 }
+                                    ]}
+                                >
+                                    <Text style={{ fontSize: 16 }}>{r.flag}</Text>
+                                    <Text style={[
+                                        styles.regionTabText,
+                                        { color: isActive ? colors.text : colors.textSecondary, fontWeight: isActive ? '900' : '600' }
+                                    ]}>
+                                        {r.label}
+                                    </Text>
+                                </TouchableOpacity>
+                            );
+                        })}
+                    </View>
+
+                    <View style={[styles.verticalDivider, { backgroundColor: colors.border }]} />
+
+                    <TouchableOpacity
+                        onPress={() => setFilterVisible(true)}
+                        activeOpacity={0.7}
+                        style={[styles.filterBtn, { backgroundColor: colors.card, borderColor: colors.border }]}
+                    >
+                        <Text style={{ fontSize: 16, marginRight: 6 }}>⚡</Text>
+                        <Text style={[styles.filterBtnText, { color: colors.text }]}>
+                            {selectedCategories.includes('ALL')
+                                ? 'All Categories'
+                                : `${selectedCategories.length} Selected`}
+                        </Text>
+                        <Text style={{ fontSize: 12, marginLeft: 6, color: brand.BLUE }}>▼</Text>
+                    </TouchableOpacity>
+                </View>
+            </View>
+
+            {/* EMAIL VERIFICATION BANNER REMOVED - REPLACED BY FULL SCREEN GATE */}
+
+
+
+            {isLoading ? (
+                <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', paddingTop: 50 }}>
                     <ActivityIndicator size="large" color={brand.BLUE} />
                 </View>
+            ) : (
+                <FlatList
+                    data={alerts}
+                    keyExtractor={item => String(item.id)}
+                    renderItem={renderProductCard}
+                    contentContainerStyle={[styles.feedScroll, { paddingTop: 10 }]} // Add top padding for spacing from header
+                    showsVerticalScrollIndicator={false}
+                    onRefresh={onRefresh}
+                    refreshing={isRefreshing}
+                    onEndReached={handleLoadMore}
+                    onEndReachedThreshold={0.5}
+                    ListFooterComponent={() => {
+                        if (isLoadingMore) return <ActivityIndicator color={brand.BLUE} style={{ marginVertical: 20 }} />;
+                        if (!isPremium && alerts.length >= 4) {
+                            // Compact Paywall for Horizontal Layout
+                            return (
+                                <View style={[styles.paywallCompact, { backgroundColor: colors.card, borderColor: colors.border }]}>
+                                    <Text style={[styles.paywallText, { color: colors.text }]}>
+                                        🔒 <Text style={{ fontWeight: 'bold' }}>Unlock all {totalAvailable}+ deals</Text>
+                                    </Text>
+                                    <TouchableOpacity style={{ backgroundColor: brand.BLUE, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20 }}>
+                                        <Text style={{ color: '#FFF', fontWeight: 'bold', fontSize: 12 }}>UPGRADE</Text>
+                                    </TouchableOpacity>
+                                </View>
+                            );
+                        }
+                        return <View style={{ height: 40 }} />;
+                    }}
+                    ListEmptyComponent={!isLoading ? (
+                        <View style={styles.emptyContainer}>
+                            <Text style={{ color: colors.textSecondary, fontSize: 14, textAlign: 'center' }}>
+                                {searchQuery ? 'No results found.' : `No alerts in this region.`}
+                            </Text>
+                        </View>
+                    ) : null}
+                />
             )}
+
+
 
             <Modal visible={isFilterVisible} animationType="fade" transparent={true}>
                 <BlurView intensity={90} tint={isDarkMode ? 'dark' : 'light'} style={styles.modalOverlay}>
@@ -603,7 +761,10 @@ const HomeScreen = () => {
                     </View>
                 </BlurView>
             </Modal>
-        </SafeAreaView>
+
+            {/* NO LOCAL DAILY LIMIT MODAL - Rendered globally in App.js */}
+
+        </SafeAreaView >
     );
 };
 
@@ -821,6 +982,48 @@ const styles = StyleSheet.create({
         shadowRadius: 2,
         elevation: 1
     },
+    discountBadge: {
+        position: 'absolute',
+        top: 12,
+        left: 12,
+        paddingHorizontal: 10,
+        paddingVertical: 5,
+        borderRadius: 8,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.2,
+        shadowRadius: 4,
+        elevation: 4,
+        zIndex: 10
+    },
+    discountBadgeText: {
+        color: '#FFF',
+        fontSize: 13,
+        fontWeight: '900',
+        letterSpacing: 0.5
+    },
+    // NEW: Savings Badge & Price Styles
+    savingsBadge: {
+        paddingHorizontal: 8,
+        paddingVertical: 2,
+        borderRadius: 6,
+        borderWidth: 1,
+        borderColor: '#D9770615'
+    },
+    savingsText: {
+        fontSize: 10,
+        fontWeight: '800',
+        letterSpacing: 0.3
+    },
+    nowPrice: {
+        fontSize: 18,
+        fontWeight: '700'
+    },
+    wasPrice: {
+        fontSize: 13,
+        fontWeight: '500',
+        textDecorationLine: 'line-through'
+    },
 
     cardContent: {
         padding: 12
@@ -840,9 +1043,14 @@ const styles = StyleSheet.create({
         marginBottom: 8
     },
     priceLeft: {
+        flex: 1,
         flexDirection: 'row',
         alignItems: 'center',
         gap: 6
+    },
+    priceRight: {
+        alignItems: 'flex-end',
+        justifyContent: 'center'
     },
     retailPrice: {
         fontSize: 12,
@@ -854,13 +1062,17 @@ const styles = StyleSheet.create({
         fontWeight: '800'
     },
     roiBadge: {
-        backgroundColor: '#10B981',
         paddingHorizontal: 8,
         paddingVertical: 4,
-        borderRadius: 6
+        borderRadius: 8
+    },
+    roiBadgeSmall: {
+        paddingHorizontal: 6,
+        paddingVertical: 2,
+        borderRadius: 6,
+        marginTop: 2
     },
     roiBadgeText: {
-        color: '#FFF',
         fontSize: 11,
         fontWeight: '800'
     },
@@ -910,7 +1122,114 @@ const styles = StyleSheet.create({
         justifyContent: 'center',
         alignItems: 'center',
         zIndex: 50
+    },
+    verificationBanner: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingHorizontal: 16,
+        paddingVertical: 12,
+        borderBottomWidth: 1,
+    },
+    verificationTitle: {
+        fontSize: 14,
+        fontWeight: '800',
+        marginBottom: 2
+    },
+    verificationDesc: {
+        fontSize: 11,
+        fontWeight: '500',
+        lineHeight: 14
+    },
+    resendBtn: {
+        paddingHorizontal: 12,
+        paddingVertical: 6,
+        borderRadius: 8,
+        justifyContent: 'center',
+        alignItems: 'center'
+    },
+    resendBtnText: {
+        color: '#FFF',
+        fontSize: 12,
+        fontWeight: '900'
+    },
+    // VERIFICATION GATE STYLES
+    verificationIconContainer: {
+        width: 100,
+        height: 100,
+        borderRadius: 50,
+        justifyContent: 'center',
+        alignItems: 'center',
+        marginBottom: 30,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 10 },
+        shadowOpacity: 0.2,
+        shadowRadius: 15,
+        elevation: 10
+    },
+    verificationBoxTitle: {
+        fontSize: 28,
+        fontWeight: '900',
+        marginBottom: 16,
+        textAlign: 'center'
+    },
+    verificationBoxDesc: {
+        fontSize: 16,
+        fontWeight: '500',
+        textAlign: 'center',
+        lineHeight: 24,
+        marginBottom: 40,
+        paddingHorizontal: 20
+    },
+    verificationActions: {
+        width: '100%',
+        gap: 16
+    },
+    primaryVerifyBtn: {
+        height: 55,
+        borderRadius: 15,
+        justifyContent: 'center',
+        alignItems: 'center',
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.1,
+        shadowRadius: 8,
+        elevation: 3
+    },
+    primaryVerifyBtnText: {
+        color: '#FFF',
+        fontSize: 16,
+        fontWeight: '800'
+    },
+    secondaryVerifyBtn: {
+        height: 55,
+        borderRadius: 15,
+        justifyContent: 'center',
+        alignItems: 'center',
+        borderWidth: 2
+    },
+    secondaryVerifyBtnText: {
+        fontSize: 16,
+        fontWeight: '800'
+    },
+    logoutVerifyBtn: {
+        height: 55,
+        justifyContent: 'center',
+        alignItems: 'center'
+    },
+    logoutVerifyBtnText: {
+        fontSize: 15,
+        fontWeight: '700',
+        textDecorationLine: 'underline'
+    },
+    bgCircle: {
+        position: 'absolute',
+        width: 300,
+        height: 300,
+        borderRadius: 150,
+        zIndex: -1
     }
 });
+
+
 
 export default HomeScreen;

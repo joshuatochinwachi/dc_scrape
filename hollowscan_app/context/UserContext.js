@@ -1,6 +1,9 @@
 import React, { createContext, useState, useEffect } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from '../Constants';
+import { registerForPushNotifications, setupNotificationHandler } from '../services/PushNotificationService';
+
+
 
 export const UserContext = createContext();
 
@@ -8,6 +11,13 @@ export const UserProvider = ({ children }) => {
     const [user, setUser] = useState(null);
     const [isLoading, setIsLoading] = useState(true);
     const [isDarkMode, setIsDarkMode] = useState(false);
+    const [telegramLinked, setTelegramLinked] = useState(false);
+    const [isPremiumTelegram, setIsPremiumTelegram] = useState(false);
+    const [premiumUntil, setPremiumUntil] = useState(null);
+    const [showLimitModal, setShowLimitModal] = useState(false);
+    const [countdown, setCountdown] = useState('');
+    const [selectedRegion, setSelectedRegion] = useState('USA Stores');
+
 
     const [dailyViews, setDailyViews] = useState({
         date: new Date().toDateString(),
@@ -22,10 +32,35 @@ export const UserProvider = ({ children }) => {
             await loadUserData();
             await loadDailyViews();
             await loadTheme();
+            await loadRegion();
+            await checkTelegramStatus();
+            setupNotificationHandler(); // Initialize global notification listener
             setIsLoading(false);
         };
+
+
         init();
     }, []);
+
+    const loadRegion = async () => {
+        try {
+            const stored = await AsyncStorage.getItem('selected_region');
+            if (stored) {
+                setSelectedRegion(stored);
+            }
+        } catch (error) {
+            console.error('[REGION] Error loading region:', error);
+        }
+    };
+
+    const updateRegion = async (newRegion) => {
+        setSelectedRegion(newRegion);
+        try {
+            await AsyncStorage.setItem('selected_region', newRegion);
+        } catch (error) {
+            console.error('[REGION] Error saving region:', error);
+        }
+    };
 
     const loadTheme = async () => {
         try {
@@ -46,7 +81,16 @@ export const UserProvider = ({ children }) => {
                 // Simple validation to ensure it's a valid object with an ID
                 if (userData && userData.id) {
                     setUser(userData);
+                    // Register for push notifications
+                    registerForPushNotifications(userData.id);
+                    // Check telegram status
+                    checkTelegramStatus(userData.id);
+                    // Background refresh to catch up if DB state changed (e.g. verified on another device)
+                    // We don't await this so startup is still fast
+                    setTimeout(() => refreshUserStatus(userData), 1000);
                 } else {
+
+
                     setUser(null);
                 }
             } else {
@@ -100,17 +144,123 @@ export const UserProvider = ({ children }) => {
         }
     };
 
+    const resendVerification = async () => {
+        if (!user?.email) return { success: false, message: 'No email found' };
+        try {
+            const response = await fetch(`${Constants.API_BASE_URL}/v1/auth/resend-code`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email: user.email }),
+            });
+            const data = await response.json();
+            return { success: data.success, message: data.message };
+        } catch (error) {
+            console.error('[AUTH] Resend error:', error);
+            return { success: false, message: 'Connection error' };
+        }
+    };
+
+    const verifyCode = async (code) => {
+        if (!user?.email || !code) return { success: false, message: 'Email and code required' };
+        try {
+            const response = await fetch(`${Constants.API_BASE_URL}/v1/auth/verify-code`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email: user.email, code }),
+            });
+            const data = await response.json();
+            if (data.success) {
+                // Refresh status to update local user object
+                await refreshUserStatus();
+            }
+            return { success: data.success, message: data.message };
+        } catch (error) {
+            console.error('[AUTH] Verify error:', error);
+            return { success: false, message: 'Connection error' };
+        }
+    };
+
+    const forgotPassword = async (email) => {
+        if (!email) return { success: false, message: 'Email required' };
+        try {
+            const response = await fetch(`${Constants.API_BASE_URL}/v1/auth/forgot-password`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email }),
+            });
+            const data = await response.json();
+            return { success: data.success, message: data.message };
+        } catch (error) {
+            console.error('[AUTH] Forgot password error:', error);
+            return { success: false, message: 'Connection error' };
+        }
+    };
+
+    const resetPassword = async (email, code, password) => {
+        if (!email || !code || !password) return { success: false, message: 'All fields required' };
+        try {
+            const response = await fetch(`${Constants.API_BASE_URL}/v1/auth/reset-password`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email, code, password }),
+            });
+            const data = await response.json();
+            return { success: data.success, message: data.message };
+        } catch (error) {
+            console.error('[AUTH] Reset password error:', error);
+            return { success: false, message: 'Connection error' };
+        }
+    };
+
+    const refreshUserStatus = async (passedUser = null) => {
+        const targetUser = passedUser || user;
+        if (!targetUser?.id) return;
+        try {
+            const response = await fetch(`${Constants.API_BASE_URL}/v1/user/status?user_id=${targetUser.id}`);
+            const data = await response.json();
+            // Update the user object with new status and verification
+            const updatedUser = {
+                ...targetUser,
+                isPremium: data.is_premium,
+                email_verified: data.email_verified,
+                subscription_status: data.status
+            };
+            await updateUser(updatedUser);
+            return data;
+        } catch (error) {
+            console.error('[USER] Status refresh error:', error);
+        }
+    };
+
+    const syncPreferences = async (preferences) => {
+        if (!user?.id) return { success: false, message: 'User not logged in' };
+        try {
+            const response = await fetch(`${Constants.API_BASE_URL}/v1/user/preferences?user_id=${user.id}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(preferences),
+            });
+            const data = await response.json();
+            return { success: data.success };
+        } catch (error) {
+            console.error('[USER] Sync preferences error:', error);
+            return { success: false };
+        }
+    };
+
     const logout = async () => {
+
         try {
             setUser(null);
             await AsyncStorage.removeItem('user_data');
-            // We keep theme and daily views even if logged out
         } catch (error) {
             console.error('[AUTH] Logout error:', error);
         }
     };
 
+
     const loadDailyViews = async () => {
+
         try {
             const stored = await AsyncStorage.getItem('daily_views');
             if (stored) {
@@ -158,6 +308,14 @@ export const UserProvider = ({ children }) => {
                 current = { date: new Date().toDateString(), products: [] };
             }
 
+            // STRICT ENFORCEMENT: Check if limit reached FIRST
+            // (User wants to block even already-viewed items once limit is hit)
+            if (current.products.length >= FREE_PRODUCT_LIMIT) {
+                console.log('[LIMIT] Daily limit reached (', current.products.length, '/', FREE_PRODUCT_LIMIT, ')');
+                setShowLimitModal(true); // Trigger modal globally
+                return { allowed: false, remaining: 0 };
+            }
+
             // Check if product already viewed today
             if (current.products.includes(productId)) {
                 console.log('[LIMIT] Product already viewed today');
@@ -165,11 +323,6 @@ export const UserProvider = ({ children }) => {
                 return { allowed: true, remaining };
             }
 
-            // Check if limit reached
-            if (current.products.length >= FREE_PRODUCT_LIMIT) {
-                console.log('[LIMIT] Daily limit reached (', current.products.length, '/', FREE_PRODUCT_LIMIT, ')');
-                return { allowed: false, remaining: 0 };
-            }
 
             // Add product to viewed list
             current.products.push(productId);
@@ -189,14 +342,76 @@ export const UserProvider = ({ children }) => {
         return Math.max(0, FREE_PRODUCT_LIMIT - dailyViews.products.length);
     };
 
+    // TIMER LOGIC FOR MODAL
+    useEffect(() => {
+        let interval;
+        if (showLimitModal) {
+            const updateCountdown = () => {
+                const now = new Date();
+                const midnight = new Date();
+                midnight.setHours(24, 0, 0, 0);
+                const diff = midnight - now;
+
+                if (diff <= 0) {
+                    setCountdown('00:00:00');
+                    return;
+                }
+
+                const hours = Math.floor(diff / (1000 * 60 * 60));
+                const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+                const seconds = Math.floor((diff % (1000 * 60)) / 1000);
+
+                setCountdown(
+                    `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
+                );
+            };
+
+            updateCountdown();
+            interval = setInterval(updateCountdown, 1000);
+        }
+        return () => clearInterval(interval);
+    }, [showLimitModal]);
+
+
+    const checkTelegramStatus = async (specificUserId = null) => {
+        const idToCheck = specificUserId || user?.id;
+        if (!idToCheck) return;
+
+        try {
+            const response = await fetch(
+                `${Constants.API_BASE_URL}/v1/user/telegram/link-status?user_id=${idToCheck}`
+            );
+            const data = await response.json();
+            if (data.success && data.linked) {
+                setTelegramLinked(true);
+                setIsPremiumTelegram(data.is_premium || false);
+                setPremiumUntil(data.premium_until || null);
+                return { linked: true, isPremium: data.is_premium };
+            } else {
+                setTelegramLinked(false);
+                return { linked: false };
+            }
+        } catch (error) {
+            console.error('[TELEGRAM] Status check error:', error);
+            return { linked: false, error };
+        }
+    };
+
+
     const updateUser = async (userData) => {
         try {
             setUser(userData);
             await AsyncStorage.setItem('user_data', JSON.stringify(userData));
+
+            // Register for push notifications if we have a user
+            if (userData && userData.id) {
+                registerForPushNotifications(userData.id);
+            }
         } catch (error) {
             console.error('[USER] Error updating user:', error);
         }
     };
+
 
     const resetDailyViews = async () => {
         const newData = {
@@ -217,7 +432,8 @@ export const UserProvider = ({ children }) => {
         }
     };
 
-    const isPremium = user?.isPremium || false;
+    const isPremium = user?.isPremium || isPremiumTelegram || false;
+
 
     return (
         <UserContext.Provider
@@ -235,8 +451,27 @@ export const UserProvider = ({ children }) => {
                 login,
                 signup,
                 logout,
+                resendVerification,
+                refreshUserStatus,
+                verifyCode,
+                forgotPassword,
+                resetPassword,
+                telegramLinked,
+
+
+                isPremiumTelegram,
+                premiumUntil,
+                checkTelegramStatus,
+                showLimitModal,
+                setShowLimitModal,
+                countdown,
+                selectedRegion,
+                updateRegion,
+                syncPreferences
             }}
         >
+
+
             {children}
         </UserContext.Provider>
     );
