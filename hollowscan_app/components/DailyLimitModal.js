@@ -21,8 +21,6 @@ const DailyLimitModal = () => {
 
     // Local state for the Telegram flow within the modal
     const [showTelegramFlow, setShowTelegramFlow] = useState(false);
-    const [telegramLinkKey, setTelegramLinkKey] = useState(null);
-    const [isGeneratingKey, setIsGeneratingKey] = useState(false);
     const [isCheckingStatus, setIsCheckingStatus] = useState(false);
 
     const colors = isDarkMode ? {
@@ -42,7 +40,7 @@ const DailyLimitModal = () => {
         try {
             const result = await checkTelegramStatus();
             if (result && result.linked) {
-                setTelegramLinkKey(null);
+                setShowTelegramFlow(false);
                 setShowTelegramFlow(false);
                 setShowLimitModal(false);
                 Alert.alert('🎉 Success', 'Telegram account linked and premium status synced!');
@@ -57,24 +55,6 @@ const DailyLimitModal = () => {
         }
     };
 
-    const handleGenerateLinkKey = async () => {
-        const userId = user?.id || 'guest-user';
-        setIsGeneratingKey(true);
-        try {
-            const response = await fetch(
-                `${Constants.API_BASE_URL}/v1/user/telegram/generate-key?user_id=${userId}`,
-                { method: 'POST', headers: { 'Content-Type': 'application/json' } }
-            );
-            const data = await response.json();
-            if (data.success) {
-                setTelegramLinkKey(data.link_key);
-            }
-        } catch (error) {
-            console.error('[TELEGRAM] Error:', error);
-        } finally {
-            setIsGeneratingKey(false);
-        }
-    };
 
     if (!showLimitModal) return null;
 
@@ -99,7 +79,7 @@ const DailyLimitModal = () => {
                         </View>
 
                         {!showTelegramFlow ? (
-                            <>
+                            <View>
                                 {/* Countdown Timer */}
                                 <View style={{ backgroundColor: isDarkMode ? 'rgba(255,255,255,0.05)' : '#F3F4F6', padding: 20, borderRadius: 16, marginBottom: 20 }}>
                                     <Text style={{ color: colors.textSecondary, fontSize: 12, textAlign: 'center', marginBottom: 8, fontWeight: '600' }}>
@@ -144,65 +124,49 @@ const DailyLimitModal = () => {
                                         Close
                                     </Text>
                                 </TouchableOpacity>
-                            </>
+                            </View>
                         ) : (
-                            <>
-                                {!telegramLinkKey ? (
-                                    <TouchableOpacity
-                                        style={{ backgroundColor: brand.BLUE, padding: 16, borderRadius: 12, marginBottom: 16 }}
-                                        onPress={handleGenerateLinkKey}
-                                        disabled={isGeneratingKey}
-                                    >
-                                        {isGeneratingKey ? (
-                                            <ActivityIndicator color="#FFF" />
-                                        ) : (
-                                            <Text style={{ color: '#FFF', fontSize: 16, fontWeight: '700', textAlign: 'center' }}>Generate Link Key</Text>
-                                        )}
-                                    </TouchableOpacity>
-                                ) : (
-                                    <View style={{ marginBottom: 20 }}>
-                                        <View style={{ backgroundColor: isDarkMode ? 'rgba(255,255,255,0.05)' : '#F9FAFB', padding: 16, borderRadius: 12, alignItems: 'center', borderWidth: 1, borderColor: colors.border, marginBottom: 16 }}>
-                                            <Text style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}>YOUR CODE</Text>
-                                            <Text style={{ fontSize: 32, fontWeight: '800', color: brand.BLUE, letterSpacing: 2 }}>{telegramLinkKey}</Text>
-                                        </View>
-
-                                        <TouchableOpacity
-                                            style={{ backgroundColor: '#0EA5E9', padding: 14, borderRadius: 12, marginBottom: 12 }}
-                                            onPress={() => Linking.openURL('https://t.me/Hollowscan_bot')}
-                                        >
-                                            <Text style={{ color: '#FFF', fontWeight: '700', textAlign: 'center' }}>🤖 Open Telegram Bot</Text>
-                                        </TouchableOpacity>
-
-                                        <Text style={{ color: colors.textSecondary, fontSize: 12, textAlign: 'center', marginBottom: 16 }}>
-                                            Send <Text style={{ fontWeight: '700' }}>/link {telegramLinkKey}</Text> to the bot
-                                        </Text>
-
-                                        <TouchableOpacity
-                                            style={{ backgroundColor: '#10B981', padding: 16, borderRadius: 12 }}
-                                            onPress={handleCheckLinkStatus}
-                                            disabled={isCheckingStatus}
-                                        >
-                                            {isCheckingStatus ? (
-                                                <ActivityIndicator color="#FFF" />
-                                            ) : (
-                                                <Text style={{ color: '#FFF', fontSize: 16, fontWeight: '700', textAlign: 'center' }}>Verify Connection</Text>
-                                            )}
-                                        </TouchableOpacity>
-                                    </View>
-                                )}
+                            <View style={{ marginBottom: 20 }}>
+                                <View style={{ backgroundColor: isDarkMode ? 'rgba(255,255,255,0.05)' : '#F9FAFB', padding: 20, borderRadius: 16, alignItems: 'center', borderWidth: 1, borderColor: colors.border, marginBottom: 20 }}>
+                                    <Text style={{ fontSize: 40, marginBottom: 16 }}>🤖</Text>
+                                    <Text style={{ fontSize: 16, fontWeight: '700', color: colors.text, textAlign: 'center', marginBottom: 8 }}>Ready to Connect?</Text>
+                                    <Text style={{ fontSize: 13, color: colors.textSecondary, textAlign: 'center', lineHeight: 18 }}>We'll open Telegram for you. Just tap "Connect" in the bot to link your account!</Text>
+                                </View>
 
                                 <TouchableOpacity
-                                    style={{ padding: 12 }}
+                                    style={{ backgroundColor: '#0EA5E9', padding: 16, borderRadius: 12, marginBottom: 12 }}
                                     onPress={() => {
-                                        setShowTelegramFlow(false);
-                                        setTelegramLinkKey(null);
+                                        const botUsername = Constants.TELEGRAM_BOT;
+                                        const telegramUrl = `https://t.me/${botUsername}?start=link_account`;
+                                        Linking.openURL(telegramUrl).catch(() => {
+                                            Alert.alert('Error', 'Could not open Telegram. Please install Telegram first.');
+                                        });
                                     }}
+                                >
+                                    <Text style={{ color: '#FFF', fontWeight: '800', textAlign: 'center', fontSize: 16 }}>🚀 Open Telegram Bot</Text>
+                                </TouchableOpacity>
+
+                                <TouchableOpacity
+                                    style={{ backgroundColor: '#10B981', padding: 16, borderRadius: 12 }}
+                                    onPress={handleCheckLinkStatus}
+                                    disabled={isCheckingStatus}
+                                >
+                                    {isCheckingStatus ? (
+                                        <ActivityIndicator color="#FFF" />
+                                    ) : (
+                                        <Text style={{ color: '#FFF', fontSize: 16, fontWeight: '700', textAlign: 'center' }}>Already Linked? Verify</Text>
+                                    )}
+                                </TouchableOpacity>
+
+                                <TouchableOpacity
+                                    style={{ padding: 12, marginTop: 16 }}
+                                    onPress={() => setShowTelegramFlow(false)}
                                 >
                                     <Text style={{ color: colors.textSecondary, fontSize: 15, fontWeight: '600', textAlign: 'center' }}>
                                         Back
                                     </Text>
                                 </TouchableOpacity>
-                            </>
+                            </View>
                         )}
                     </View>
                 </View>

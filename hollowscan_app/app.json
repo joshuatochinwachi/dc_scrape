@@ -13,14 +13,15 @@
       "backgroundColor": "#0A0A0B"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.hollowscan.app"
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0A0A0B"
       },
-      "package": "com.smartymetrics.hollowscan_app"
+      "package": "com.hollowscan.app"
     },
     "web": {
       "favicon": "./assets/favicon.png"

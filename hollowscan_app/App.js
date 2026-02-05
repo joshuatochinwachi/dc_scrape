@@ -4,7 +4,7 @@ import { Text, View, ActivityIndicator, Alert } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Linking from 'expo-linking';
 import { SavedProvider } from './context/SavedContext';
 import { UserProvider, UserContext } from './context/UserContext';
@@ -43,6 +43,11 @@ function AuthNavigator() {
 function TabNavigator() {
   const brand = Constants.BRAND;
   const { isDarkMode } = React.useContext(UserContext);
+  const insets = useSafeAreaInsets();
+
+  // Combine inset with base padding for professional clearance
+  const bottomPadding = Math.max(insets.bottom, 12);
+  const barHeight = 55 + bottomPadding;
 
   return (
     <Tab.Navigator
@@ -53,8 +58,8 @@ function TabNavigator() {
         tabBarStyle: {
           borderTopWidth: 1,
           borderTopColor: isDarkMode ? '#1C1C1E' : '#F3F4F6',
-          height: 85,
-          paddingBottom: 20,
+          height: barHeight,
+          paddingBottom: bottomPadding,
           paddingTop: 10,
           elevation: 0,
           backgroundColor: isDarkMode ? brand.DARK_BG : '#FFF'
