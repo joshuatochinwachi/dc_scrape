@@ -52,15 +52,38 @@ const ProductDetailScreen = ({ route, navigation }) => {
         if (route.params?.product) {
             // Direct navigation from app
             setProduct(route.params.product);
+            setLoading(false);
         } else if (route.params?.productId) {
             // Deep link navigation
             const productId = route.params.productId;
-            // Fetch product by ID from backend
-            // For now, we'll try to find it in HomeScreen's data or fetch from API
-            console.log('[DEEPLINK] Loading product:', productId);
-            // You may need to implement a function to fetch product by ID
+            setLoading(true);
+            const fetchProduct = async () => {
+                try {
+                    const response = await fetch(`${Constants.API_BASE_URL}/v1/product/detail?product_id=${productId}`);
+                    const data = await response.json();
+                    if (data.success && data.product) {
+                        setProduct(data.product);
+                    } else {
+                        console.error('[DEEPLINK] Product not found:', data.message);
+                    }
+                } catch (error) {
+                    console.error('[DEEPLINK] Fetch error:', error);
+                } finally {
+                    setLoading(false);
+                }
+            };
+            fetchProduct();
         }
     }, [route.params]);
+
+    if (loading) {
+        return (
+            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: colors.bg }}>
+                <ActivityIndicator size="large" color={brand.BLUE} />
+                <Text style={{ marginTop: 12, color: colors.textSecondary }}>Loading product...</Text>
+            </View>
+        );
+    }
 
     if (!product) {
         return (

@@ -529,7 +529,8 @@ async def send_expo_push_notification(tokens: List[str], title: str, body: str, 
         "data": data or {},
         "badge": 1,
         "priority": "high",
-        "channelId": "default"
+        "channelId": "default",
+        "ttl": 2419200
     }
 
     try:
@@ -892,28 +893,38 @@ async def background_notification_worker():
                             if len(title) > 50: title = title[:47] + "..."
                             
                             # Generate sleek title with discount info
-                            raw_was = str(product_data.get("was_price", "") or product_data.get("resell_price", ""))
-                            raw_now = str(product_data.get("price", ""))
+                            raw_was = str(product_data.get("was_price", "") or product_data.get("resell_price", "") or "")
+                            raw_now = str(product_data.get("price", "") or "")
                             
-                            # Try to detect discount for the title
+                            # Clean prices for logic
+                            def clean_p(v):
+                                if not v or v.lower() in ["n/a", "0.0", "0"]: return 0
+                                return float(re.sub(r'[^0-9.]', '', v))
+                            
+                            price_val = clean_p(raw_now)
+                            was_val = clean_p(raw_was)
+                            
+                            # Generate Prefix
                             prefix = "🔥"
-                            try:
-                                price_val = float(re.sub(r'[^0-9.]', '', raw_now)) if raw_now else 0
-                                was_val = float(re.sub(r'[^0-9.]', '', raw_was)) if raw_was else 0
-                                if was_val > price_val and price_val > 0:
-                                    discount = int(((was_val - price_val) / was_val) * 100)
-                                    if discount >= 10:
-                                        prefix = f"📉 {discount}% OFF"
-                            except: pass
+                            if was_val > price_val and price_val > 0:
+                                discount = int(((was_val - price_val) / was_val) * 100)
+                                if discount >= 10:
+                                    prefix = f"📉 {discount}% OFF"
                             
                             final_title = f"{prefix}: {title}"
                             
                             # Enhanced informative body
-                            price_info = f"Price: ${raw_now}" if raw_now else "Check Price"
-                            if raw_was and raw_was != raw_now:
-                                price_info += f" (Market: ${raw_was})"
-                                
-                            body = f"{product_data.get('title', 'View Deal')} | {price_info} | {msg_region}"
+                            body_parts = []
+                            if price_val > 0:
+                                body_parts.append(f"Price: ${raw_now}")
+                            if was_val > 0 and was_val != price_val:
+                                body_parts.append(f"Market: ${raw_was}")
+                            
+                            # Add Store/Region info
+                            region_label = msg_region.replace(" Stores", "")
+                            body_parts.append(f"{region_label} {msg_category}")
+                            
+                            body = " | ".join(body_parts)
                             
                             # Target specific users based on preferences
                             target_tokens = []
@@ -1429,6 +1440,30 @@ async def delete_saved_deal(user_id: str = Query(...), alert_id: str = Query(...
         return {"success": False, "message": f"DB Error: {response.status_code}"}
     except Exception as e:
         print(f"[DEALS] Error deleting: {e}")
+        return {"success": False, "message": str(e)}
+
+@app.get("/v1/product/detail")
+async def get_product_detail(product_id: str = Query(...)):
+    """Fetch a single product by its ID for deep linking"""
+    try:
+        # 1. Fetch from discord_messages
+        response = await http_client.get(
+            f"{URL}/rest/v1/discord_messages?id=eq.{product_id}&select=*",
+            headers=HEADERS
+        )
+        if response.status_code == 200 and response.json():
+            msg = response.json()[0]
+            
+            # 2. Extract using existing logic
+            channel_map = await get_channels_data()
+            prod = extract_product(msg, channel_map)
+            
+            if prod:
+                return {"success": True, "product": prod}
+        
+        return {"success": False, "message": "Product not found"}
+    except Exception as e:
+        print(f"[PRODUCT] Error fetching detail: {e}")
         return {"success": False, "message": str(e)}
 
 @app.get("/health")

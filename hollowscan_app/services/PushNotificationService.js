@@ -104,16 +104,45 @@ export const sendLocalNotification = async (title, body, data = {}) => {
 
 export const sendDealNotification = async (product) => {
     try {
-        const { product_data, category_name, country_code } = product;
-        const title = `🎉 ${product_data?.title?.substring(0, 45)}${product_data?.title?.length > 45 ? '...' : ''}`;
-        const price = product_data?.price || 'N/A';
-        const resell = product_data?.resell || 'N/A';
-        const body = `Price: $${price} | Market: $${resell} | Store: ${country_code} | Cat: ${category_name}`;
+        const { product_data, category_name, region } = product;
+        const title = product_data?.title || 'New Deal Detected!';
 
-        await sendLocalNotification(title, body, {
-            product_id: product_data?.id || 'unknown',
+        // 1. Calculate Discount for Title
+        let discountInfo = '🎉 ';
+        const price = product_data?.price;
+        const wasPrice = product_data?.was_price || product_data?.resell;
+
+        if (price && wasPrice) {
+            const p = parseFloat(String(price).replace(/[^0-9.]/g, ''));
+            const w = parseFloat(String(wasPrice).replace(/[^0-9.]/g, ''));
+            if (w > p && p > 0) {
+                const disc = Math.round(((w - p) / w) * 100);
+                if (disc >= 10) discountInfo = `📉 ${disc}% OFF: `;
+            }
+        }
+
+        const finalTitle = `${discountInfo}${title.substring(0, 45)}${title.length > 45 ? '...' : ''}`;
+
+        // 2. Build Body (Omit N/A and refine labels)
+        const parts = [];
+        if (price && price !== '0.0' && price !== 'N/A' && price !== '0') {
+            parts.push(`Price: $${price}`);
+        }
+        if (wasPrice && wasPrice !== '0.0' && wasPrice !== 'N/A' && wasPrice !== '0' && wasPrice !== price) {
+            parts.push(`Market: $${wasPrice}`);
+        }
+
+        // Region/Store
+        const storeLabel = category_name || 'HollowScan';
+        const regionLabel = region ? region.replace(' Stores', '') : '';
+        parts.push(`${regionLabel} ${storeLabel}`.trim());
+
+        const finalBody = parts.join(' | ');
+
+        await sendLocalNotification(finalTitle, finalBody, {
+            product_id: product?.id || 'unknown',
             category: category_name,
-            country: country_code,
+            region: region,
         });
     } catch (error) {
         console.log('[NOTIFICATIONS] Error sending deal notification:', error);
@@ -127,7 +156,9 @@ export const registerForPushNotifications = async (userId) => {
         if (!hasPermission) return null;
 
         if (Device.isDevice) {
-            const token = (await Notifications.getExpoPushTokenAsync()).data;
+            const token = (await Notifications.getExpoPushTokenAsync({
+                projectId: '2f7823be-eb44-4956-8297-4969baf0a524'
+            })).data;
             console.log('[NOTIFICATIONS] Expo Push Token:', token);
 
             if (userId) {

@@ -11,7 +11,7 @@ const STORAGE_KEY_NOTIFICATIONS = '@hollowscan_notifications_enabled';
 const STORAGE_KEY_SUBS = '@hollowscan_subscriptions';
 
 const AlertsScreen = () => {
-    const { isDarkMode, selectedRegion, updateRegion } = useContext(UserContext);
+    const { isDarkMode, selectedRegion, updateRegion, syncPreferences } = useContext(UserContext);
     const brand = Constants.BRAND;
 
     // Theme setup
@@ -101,21 +101,26 @@ const AlertsScreen = () => {
 
     const syncWithCloud = async (enabled, subs) => {
         setIsSyncing(true);
-        const regionalPrefs = {};
-        Object.keys(categories).forEach(region => {
-            const activeInRegion = categories[region]
-                .filter(sub => subs[sub])
-                .map(sub => sub);
-            if (activeInRegion.length > 0) {
-                regionalPrefs[region] = activeInRegion;
-            }
-        });
+        try {
+            const regionalPrefs = {};
+            Object.keys(categories).forEach(region => {
+                const activeInRegion = categories[region]
+                    .filter(sub => subs[sub])
+                    .map(sub => sub);
+                if (activeInRegion.length > 0) {
+                    regionalPrefs[region] = activeInRegion;
+                }
+            });
 
-        await syncPreferences({
-            enabled: enabled,
-            regions: regionalPrefs
-        });
-        setIsSyncing(false);
+            await syncPreferences({
+                enabled: enabled,
+                regions: regionalPrefs
+            });
+        } catch (error) {
+            console.error('[ALERTS] Sync error:', error);
+        } finally {
+            setIsSyncing(false);
+        }
     };
 
     // Master Toggle Handler (Migrated from Profile)

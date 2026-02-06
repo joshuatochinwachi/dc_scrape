@@ -1,4 +1,4 @@
-import React, { createContext, useState, useEffect } from 'react';
+import React, { createContext, useState, useEffect, useRef } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Notifications from 'expo-notifications';
 import Constants from '../Constants';
@@ -10,6 +10,13 @@ export const UserContext = createContext();
 
 export const UserProvider = ({ children }) => {
     const [user, setUser] = useState(null);
+    const userRef = useRef(null);
+
+    // Keep userRef in sync with state
+    useEffect(() => {
+        userRef.current = user;
+    }, [user]);
+
     const [isLoading, setIsLoading] = useState(true);
     const [isDarkMode, setIsDarkMode] = useState(false);
     const [telegramLinked, setTelegramLinked] = useState(false);
@@ -34,7 +41,6 @@ export const UserProvider = ({ children }) => {
             await loadDailyViews();
             await loadTheme();
             await loadRegion();
-            await checkTelegramStatus();
             setupNotificationHandler(); // Initialize global notification listener
             setIsLoading(false);
         };
@@ -215,19 +221,30 @@ export const UserProvider = ({ children }) => {
     };
 
     const refreshUserStatus = async (passedUser = null) => {
-        const targetUser = passedUser || user;
+        const targetUser = passedUser || userRef.current;
         if (!targetUser?.id) return;
+
         try {
+            const userIdBeforeFetch = targetUser.id;
             const response = await fetch(`${Constants.API_BASE_URL}/v1/user/status?user_id=${targetUser.id}`);
             const data = await response.json();
+
+            // RACE CONDITION GUARD: Using live userRef.current
+            if (!userRef.current || userRef.current.id !== userIdBeforeFetch) {
+                console.log('[USER] Status refresh ignored: user changed or logged out during fetch');
+                return;
+            }
+
             // Update the user object with new status and verification
             const updatedUser = {
-                ...targetUser,
+                ...userRef.current, // Use most recent ref as base
                 isPremium: data.is_premium,
                 email_verified: data.email_verified,
                 subscription_status: data.status
             };
-            await updateUser(updatedUser);
+
+            setUser(updatedUser);
+            await AsyncStorage.setItem('user_data', JSON.stringify(updatedUser));
             return data;
         } catch (error) {
             console.error('[USER] Status refresh error:', error);
@@ -252,20 +269,31 @@ export const UserProvider = ({ children }) => {
 
     const logout = async () => {
         try {
+            console.log('[AUTH] Logging out user:', userRef.current?.id);
             // Unregister push token from backend before logging out
-            if (user?.id) {
+            if (userRef.current?.id) {
                 try {
-                    const tokenData = await Notifications.getExpoPushTokenAsync();
+                    const tokenData = await Notifications.getExpoPushTokenAsync({
+                        projectId: '2f7823be-eb44-4956-8297-4969baf0a524'
+                    });
                     if (tokenData && tokenData.data) {
-                        await unregisterPushToken(user.id, tokenData.data);
+                        await unregisterPushToken(userRef.current.id, tokenData.data);
                     }
                 } catch (pushError) {
                     console.log('[AUTH] Error unregistering push token:', pushError);
                 }
             }
 
+            // IMMEDIATELY clear ref to stop background tasks
+            userRef.current = null;
             setUser(null);
+            setTelegramLinked(false);
+            setIsPremiumTelegram(false);
+            setPremiumUntil(null);
+
+            // Clear storage
             await AsyncStorage.removeItem('user_data');
+            console.log('[AUTH] Logout complete');
         } catch (error) {
             console.error('[AUTH] Logout error:', error);
         }
@@ -433,8 +461,9 @@ export const UserProvider = ({ children }) => {
 
     const checkTelegramStatus = async (specificUserId = null) => {
         const idToCheck = specificUserId || user?.id;
-        console.log(`[DEBUG] checkTelegramStatus for ID: '${idToCheck}'`);
         if (!idToCheck) return;
+
+        console.log(`[DEBUG] checkTelegramStatus for ID: '${idToCheck}'`);
 
         try {
             const url = `${Constants.API_BASE_URL}/v1/user/telegram/link-status?user_id=${idToCheck}`;
@@ -456,21 +485,32 @@ export const UserProvider = ({ children }) => {
                 return { linked: false, error: 'Invalid response from server' };
             }
 
+            if (!userRef.current || userRef.current.id !== idToCheck) {
+                console.log('[TELEGRAM] Status check ignored: user changed or logged out during fetch');
+                return { linked: false };
+            }
+
             if (data.success && data.linked) {
                 setTelegramLinked(true);
                 setIsPremiumTelegram(data.is_premium || false);
                 setPremiumUntil(data.premium_until || null);
 
-                // Sycn with main user state too
+                // Sync with main user state too
                 refreshUserStatus();
 
                 return { linked: true, isPremium: data.is_premium };
             } else {
                 setTelegramLinked(false);
+                setIsPremiumTelegram(false);
+                setPremiumUntil(null);
                 return { linked: false };
             }
         } catch (error) {
             console.error('[TELEGRAM] Status check error:', error);
+            // Default to not-linked on error for safety
+            setTelegramLinked(false);
+            setIsPremiumTelegram(false);
+            setPremiumUntil(null);
             return { linked: false, error: error.message };
         }
     };
@@ -478,12 +518,20 @@ export const UserProvider = ({ children }) => {
 
     const updateUser = async (userData) => {
         try {
+            if (!userData) {
+                // Use logout for complete cleanup
+                return;
+            }
+
             setUser(userData);
             await AsyncStorage.setItem('user_data', JSON.stringify(userData));
 
             // Register for push notifications if we have a user
-            if (userData && userData.id) {
+            if (userData.id) {
                 registerForPushNotifications(userData.id);
+                // Refresh all statuses for the new user
+                checkTelegramStatus(userData.id);
+                refreshUserStatus(userData);
             }
         } catch (error) {
             console.error('[USER] Error updating user:', error);
@@ -540,11 +588,6 @@ export const UserProvider = ({ children }) => {
                 telegramLinked,
                 isPremiumTelegram,
                 premiumUntil,
-
-
-                isPremiumTelegram,
-                premiumUntil,
-                checkTelegramStatus,
                 showLimitModal,
                 setShowLimitModal,
                 countdown,
