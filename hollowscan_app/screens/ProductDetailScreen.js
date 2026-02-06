@@ -1,5 +1,5 @@
 import React, { useContext, useState, useEffect } from 'react';
-import { StyleSheet, View, Text, ScrollView, Image, TouchableOpacity, Linking, Share, Dimensions } from 'react-native';
+import { StyleSheet, View, Text, ScrollView, Image, TouchableOpacity, Linking, Share, Dimensions, ActivityIndicator } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { BlurView } from 'expo-blur';
@@ -174,11 +174,18 @@ const ProductDetailScreen = ({ route, navigation }) => {
 
     const handleShare = async () => {
         try {
-            // Create deep link for the product
-            const deepLink = `hollowscan://product/${product.id}`;
+            // Create landing page link (using backend so it's clickable and rich)
+            const deepLink = `${Constants.API_BASE_URL}/share/${product.id}`;
 
             // Create share message with deep link
-            const message = `🔥 Check out this deal from HollowScan!\n\n📦 ${data.title}\n💵 Buy: ${formatPriceDisplay(buyPrice, product.region)}\n💰 Sell: ${formatPriceDisplay(sellPrice, product.region)}\n📈 Profit: ${formatPriceDisplay(netProfit, product.region)} (ROI: ${roi}%)\n\nOpen in app: ${deepLink}`;
+            let message = `🔥 Check out this deal from HollowScan!\n\n📦 ${data.title}\n💵 Buy: ${formatPriceDisplay(buyPrice, product.region)}`;
+
+            if (sellPrice > 0) {
+                message += `\n💰 Sell: ${formatPriceDisplay(sellPrice, product.region)}`;
+                message += `\n📈 Profit: ${formatPriceDisplay(netProfit, product.region)} (ROI: ${roi}%)`;
+            }
+
+            message += `\n\nOpen in app: ${deepLink}`;
 
             await Share.share({
                 message: message,

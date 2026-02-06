@@ -90,16 +90,15 @@ const DailyLimitModal = () => {
                                     </Text>
                                 </View>
 
-                                {/* Premium CTA */}
+                                {/* Google Pay CTA */}
                                 <TouchableOpacity
-                                    style={{ backgroundColor: brand.BLUE, padding: 16, borderRadius: 12, marginBottom: 12 }}
+                                    style={{ backgroundColor: isDarkMode ? '#FFF' : '#111', padding: 16, borderRadius: 12, marginBottom: 12 }}
                                     onPress={() => {
-                                        setShowLimitModal(false);
-                                        navigation.navigate('Profile');
+                                        Alert.alert('Payment Method', 'Google Pay integration is coming soon! Please link your Telegram account to subscribe via our automated bot for now.');
                                     }}
                                 >
-                                    <Text style={{ color: '#FFF', fontSize: 16, fontWeight: '700', textAlign: 'center' }}>
-                                        👑 Upgrade to Premium
+                                    <Text style={{ color: isDarkMode ? '#000' : '#FFF', fontSize: 16, fontWeight: '800', textAlign: 'center' }}>
+                                        Pay with Google Pay
                                     </Text>
                                 </TouchableOpacity>
 
@@ -109,7 +108,7 @@ const DailyLimitModal = () => {
                                         style={{ backgroundColor: '#0EA5E9', padding: 16, borderRadius: 12, marginBottom: 12 }}
                                         onPress={() => setShowTelegramFlow(true)}
                                     >
-                                        <Text style={{ color: '#FFF', fontSize: 16, fontWeight: '700', textAlign: 'center' }}>
+                                        <Text style={{ color: '#FFF', fontSize: 16, fontWeight: '800', textAlign: 'center' }}>
                                             📱 Connect Telegram
                                         </Text>
                                     </TouchableOpacity>
@@ -137,7 +136,7 @@ const DailyLimitModal = () => {
                                     style={{ backgroundColor: '#0EA5E9', padding: 16, borderRadius: 12, marginBottom: 12 }}
                                     onPress={() => {
                                         // New Direct Link: App -> Telegram with user ID
-                                        const telegramUrl = `https://t.me/HollowScanBot?start=link_${user.id}`;
+                                        const telegramUrl = `https://t.me/hollowscan_bot?start=link_${user.id}`;
                                         Linking.openURL(telegramUrl).catch(() => {
                                             Alert.alert('Error', 'Could not open Telegram. Please install Telegram first.');
                                         });

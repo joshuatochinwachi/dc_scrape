@@ -19,6 +19,7 @@ import hashlib
 import string
 import random
 from typing import List, Optional, Dict, Any
+from pydantic import BaseModel
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from supabase_utils import get_supabase_config, sanitize_text
@@ -72,6 +73,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 URL, KEY = get_supabase_config()
 HEADERS = {'apikey': KEY, 'Authorization': f'Bearer {KEY}', 'Content-Type': 'application/json', 'Prefer': 'return=representation'}
+SUPABASE_BUCKET = "monitor-data"
 
 # Global storage for push tokens (Move to DB irl)
 USER_PUSH_TOKENS = {} # {user_id: [tokens]}
@@ -136,13 +138,86 @@ async def create_user(email: str = None, apple_id: str = None) -> Optional[Dict]
     except Exception as e: print(f"[DB] Error creating user: {e}")
     return None
 
-async def update_user(user_id: str, data: Dict) -> bool:
+async def update_user(user_id: str, data: Dict, return_details: bool = False) -> Any:
     try:
         data["updated_at"] = datetime.now(timezone.utc).isoformat()
         response = await http_client.patch(f"{URL}/rest/v1/users?id=eq.{user_id}", headers=HEADERS, json=data)
-        return response.status_code in [200, 201, 204]
-    except Exception as e: print(f"[DB] Error updating user: {e}")
+        success = response.status_code in [200, 201, 204]
+        if return_details:
+            msg = "Success" if success else f"DB Error {response.status_code}: {response.text}"
+            return success, msg
+        return success
+    except Exception as e:
+        print(f"[DB] Error updating user: {e}")
+        if return_details: return False, str(e)
     return False
+
+async def verify_premium_status(user_id: str, user_data: Dict = None, background_tasks: BackgroundTasks = None) -> bool:
+    """Strictly verify premium status, especially if source is Telegram"""
+    try:
+        if not user_data:
+            user_data = await get_user_by_id(user_id)
+        if not user_data: return False
+
+        sub_status = user_data.get("subscription_status")
+        sub_end = user_data.get("subscription_end")
+        sub_source = user_data.get("subscription_source")
+        
+        is_premium = False
+        if sub_status == "active" and sub_end:
+            try:
+                end_dt = datetime.fromisoformat(sub_end.replace('Z', '+00:00'))
+                if end_dt.tzinfo is None: end_dt = end_dt.replace(tzinfo=timezone.utc)
+                if end_dt > datetime.now(timezone.utc):
+                    is_premium = True
+            except: pass
+
+        # STRICT CHECK for Telegram Source
+        if is_premium and sub_source == "telegram":
+            # Must verify link still exists
+            links_resp = await http_client.get(
+                f"{URL}/rest/v1/user_telegram_links?user_id=eq.{user_id}&select=telegram_id",
+                headers=HEADERS
+            )
+            if links_resp.status_code != 200 or not links_resp.json():
+                print(f"[STRICT] user {user_id} has no telegram link but is marked premium. Downgrading...")
+                is_premium = False
+                if background_tasks:
+                    background_tasks.add_task(update_user, user_id, {
+                        "subscription_status": "free",
+                        "subscription_end": None,
+                        "subscription_source": None
+                    })
+            else:
+                # Link exists, verify with bot_users.json for immediate revocation
+                telegram_id = links_resp.json()[0].get("telegram_id")
+                bot_users = await get_bot_users_data()
+                tg_user_data = bot_users.get(str(telegram_id), {})
+                expiry_str = tg_user_data.get("expiry")
+                
+                valid_tg_premium = False
+                if expiry_str:
+                    try:
+                        exp_dt = datetime.fromisoformat(expiry_str.replace('Z', '+00:00'))
+                        if exp_dt.tzinfo is None: exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+                        if exp_dt > datetime.now(timezone.utc):
+                            valid_tg_premium = True
+                    except: pass
+                
+                if not valid_tg_premium:
+                    print(f"[STRICT] user {user_id} telegram premium expired/revoked in bot_users. Downgrading...")
+                    is_premium = False
+                    if background_tasks:
+                        background_tasks.add_task(update_user, user_id, {
+                            "subscription_status": "free",
+                            "subscription_end": None,
+                            "subscription_source": None
+                        })
+
+        return is_premium
+    except Exception as e:
+        print(f"[STRICT] Error verifying premium for {user_id}: {e}")
+        return False
 
 async def link_telegram_account(user_id: str, telegram_id: str, telegram_username: str = None) -> bool:
     try:
@@ -294,13 +369,28 @@ async def signup(background_tasks: BackgroundTasks, data: Dict = Body(...)):
         payload = {"email": email, "password_hash": hashed, "subscription_status": "free", "email_verified": False, "created_at": datetime.now(timezone.utc).isoformat()}
         response = await http_client.post(f"{URL}/rest/v1/users", headers=HEADERS, json=payload)
         if response.status_code in [200, 201]:
-            user = response.json()[0] if isinstance(response.json(), list) else response.json()
+            user = response.json()
+            if isinstance(user, list) and len(user) > 0: user = user[0]
             # Trigger verification email in background
             background_tasks.add_task(trigger_email_verification, email)
-            return {"success": True, "user": {"id": user["id"], "email": user["email"], "isPremium": user.get("subscription_status") == "active", "email_verified": False}}
-
+            return {
+                "success": True,
+                "user": {
+                    "id": user["id"],
+                    "email": user["email"],
+                    "name": user.get("name"),
+                    "bio": user.get("bio"),
+                    "location": user.get("location"),
+                    "avatar_url": user.get("avatar_url"),
+                    "is_premium": False,
+                    "isPremium": False,
+                    "subscription_status": "free",
+                    "status": "free",
+                    "email_verified": False,
+                    "is_verified": False
+                }
+            }
         else: raise HTTPException(status_code=500, detail="Failed to create user")
-    except HTTPException: raise
     except Exception as e:
         print(f"[AUTH] Signup error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -506,7 +596,6 @@ async def change_password(data: Dict = Body(...)):
     # Update to new password
     new_hash = hash_password(new_password)
     success = await update_user(user_id, {"password_hash": new_hash})
-    
     if success:
         return {"success": True, "message": "Password updated successfully"}
     else:
@@ -556,68 +645,123 @@ bot_users_cache = {
 }
 
 async def get_bot_users_data():
-    """Fetch and cache bot users data from Supabase Storage"""
+    """Fetch and cache bot users data from Supabase Storage with Auth"""
     global bot_users_cache
     now = time.time()
-    # Cache for 60 seconds
-    if now - bot_users_cache["last_fetched"] < 60 and bot_users_cache["data"]:
+    # Cache for 30 seconds (keep it fresh for "immediate" changes)
+    if now - bot_users_cache["last_fetched"] < 30 and bot_users_cache["data"]:
         return bot_users_cache["data"]
         
     try:
-        url, key = get_supabase_config()
-        storage_url = f"{url}/storage/v1/object/public/monitor-data/discord_josh/bot_users.json"
-        
-        # Use centralized http_client instead of creating a new one
-        response = await http_client.get(storage_url)
+        # Use authenticated URL and HEADERS for private access
+        response = await http_client.get(
+            f"{URL}/storage/v1/object/authenticated/{SUPABASE_BUCKET}/discord_josh/bot_users.json",
+            headers=HEADERS
+        )
         if response.status_code == 200:
             data = response.json()
             bot_users_cache["data"] = data
             bot_users_cache["last_fetched"] = now
             return data
+        print(f"[BOT_USERS] Fetch failed: {response.status_code}")
     except Exception as e:
         print(f"[BOT] Error fetching bot users: {e}")
-        
-    return bot_users_cache["data"]
+    
+    return bot_users_cache.get("data", {})
 
 # --- USER STATUS ENDPOINT ---
 
 @app.get("/v1/user/status")
-async def get_user_status(user_id: str = Query(...)):
+async def get_user_status(background_tasks: BackgroundTasks, user_id: str = Query(...)):
     """Get user's current subscription and verification status"""
     try:
-        response = await http_client.get(
-            f"{URL}/rest/v1/users?id=eq.{user_id}&select=*",
-            headers=HEADERS
-        )
-        if response.status_code == 200 and response.json():
-            user_data = response.json()[0]
-            
-            # Check if premium
-            is_premium = False
-            subscription_end = user_data.get("subscription_end")
-            subscription_status = user_data.get("subscription_status")
-            
-            if subscription_status == "active" and subscription_end:
-                try:
-                    end_dt = datetime.fromisoformat(subscription_end.replace('Z', '+00:00'))
-                    if end_dt.tzinfo is None:
-                        end_dt = end_dt.replace(tzinfo=timezone.utc)
-                    if end_dt > datetime.now(timezone.utc):
-                        is_premium = True
-                except:
-                    pass
-            
-            return {
-                "success": True,
-                "is_premium": is_premium,
-                "email_verified": user_data.get("email_verified", False),
-                "status": subscription_status or "free",
-                "subscription_end": subscription_end
-            }
-        else:
+        user_data = await get_user_by_id(user_id)
+        if not user_data:
             return {"success": False, "message": "User not found"}
+
+        # 1. Use strict verification for existing status
+        is_premium = await verify_premium_status(user_id, user_data, background_tasks)
+        subscription_end = user_data.get("subscription_end")
+        
+        # 2. PROACTIVE: Also check Telegram linking status if not already premium
+        if not is_premium:
+            try:
+                # Check if user has a linked telegram account
+                links_resp = await http_client.get(
+                    f"{URL}/rest/v1/user_telegram_links?user_id=eq.{user_id}&select=telegram_id",
+                    headers=HEADERS
+                )
+                if links_resp.status_code == 200 and links_resp.json():
+                    telegram_id = links_resp.json()[0].get("telegram_id")
+                    if telegram_id:
+                        bot_users = await get_bot_users_data()
+                        tg_user_data = bot_users.get(str(telegram_id), {})
+                        expiry_str = tg_user_data.get("expiry")
+                        if expiry_str:
+                            try:
+                                exp_dt = datetime.fromisoformat(expiry_str.replace('Z', '+00:00'))
+                                if exp_dt.tzinfo is None: exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+                                if exp_dt > datetime.now(timezone.utc):
+                                    is_premium = True
+                                    subscription_end = expiry_str
+                                    # Sync back to DB so subsequent checks are faster
+                                    background_tasks.add_task(update_user, user_id, {
+                                        "subscription_status": "active",
+                                        "subscription_end": expiry_str,
+                                        "subscription_source": "telegram"
+                                    })
+                            except: pass
+            except Exception as e:
+                print(f"[STATUS] TG check failed: {e}")
+
+        return {
+            "success": True,
+            "is_premium": is_premium,
+            "subscription_end": subscription_end,
+            "status": "active" if is_premium else "free",
+            "subscription_status": "active" if is_premium else "free", # Keeping both for safety
+            "email_verified": user_data.get("email_verified", False),
+            "is_verified": user_data.get("email_verified", False), # Keeping both for safety
+            "email": user_data.get("email"),
+            "name": user_data.get("name"),
+            "bio": user_data.get("bio"),
+            "location": user_data.get("location"),
+            "avatar_url": user_data.get("avatar_url"),
+            "region": user_data.get("region", "USA Stores")
+        }
     except Exception as e:
         print(f"[STATUS] Error: {e}")
+        return {"success": False, "message": str(e)}
+
+# --- USER PROFILE ENDPOINTS ---
+
+class UserProfileUpdate(BaseModel):
+    user_id: str
+    name: Optional[str] = None
+    location: Optional[str] = None
+    bio: Optional[str] = None
+    avatar_url: Optional[str] = None
+
+@app.patch("/v1/user/profile")
+async def update_user_profile(profile: UserProfileUpdate):
+    """Update user profile details"""
+    try:
+        data = {}
+        if profile.name is not None: data["name"] = profile.name
+        if profile.location is not None: data["location"] = profile.location
+        if profile.bio is not None: data["bio"] = profile.bio
+        if profile.avatar_url is not None: data["avatar_url"] = profile.avatar_url
+        
+        if not data:
+            return {"success": False, "message": "No changes provided"}
+            
+        success, msg = await update_user(profile.user_id, data, return_details=True)
+        if success:
+            return {"success": True, "message": "Profile updated successfully"}
+        else:
+            return {"success": False, "message": f"Failed: {msg}"}
+    except Exception as e:
+        print(f"[PROFILE] Error updating: {e}")
         return {"success": False, "message": str(e)}
 
 # --- TELEGRAM LINKING ENDPOINTS ---
@@ -682,7 +826,6 @@ async def link_telegram_endpoint(data: Dict = Body(...)):
     # 1. Verify Token
     try:
         # Check token and expiry
-        # Note: 'gt' operator for expiry check
         now_iso = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         response = await http_client.get(
             f"{URL}/rest/v1/telegram_link_tokens",
@@ -703,28 +846,26 @@ async def link_telegram_endpoint(data: Dict = Body(...)):
         if not telegram_id:
             return {"success": False, "message": "Invalid token data"}
             
-        # 2. Link Account
+        # 2. Link Account Transfer Logic
+        # Check if this Telegram account is already linked to SOMEONE ELSE
         existing_link_check = await http_client.get(
             f"{URL}/rest/v1/user_telegram_links?telegram_id=eq.{telegram_id}&select=user_id",
             headers=HEADERS
         )
+        
         if existing_link_check.status_code == 200 and existing_link_check.json():
-            old_user_id = existing_link_check.json()[0]['user_id']
-            if old_user_id != user_id:
-                 print(f"[LINK] Telegram account already linked to user {old_user_id}. Transferring link to {user_id}...")
-                 
-                 # 1. Unlink from old user
-                 await http_client.delete(f"{URL}/rest/v1/user_telegram_links?user_id=eq.{old_user_id}", headers=HEADERS)
-                 
-                 # 2. Reset old user's premium status if it was from Telegram
-                 old_user_data = await get_user_by_id(old_user_id)
-                 if old_user_data and old_user_data.get("subscription_source") == "telegram":
-                     await update_user(old_user_id, {
-                         "subscription_status": "free",
-                         "subscription_end": None,
-                         "subscription_source": None
-                     })
-                     print(f"[LINK] Reset premium for old user {old_user_id} during transfer")
+            for link in existing_link_check.json():
+                old_user_id_val = link.get('user_id')
+                if old_user_id_val and old_user_id_val != user_id:
+                    print(f"[LINK] Revoking premium for old user {old_user_id_val} during transfer...")
+                    # 1. Unlink from old user
+                    await http_client.delete(f"{URL}/rest/v1/user_telegram_links?user_id=eq.{old_user_id_val}", headers=HEADERS)
+                    # 2. Reset old user's premium status IMMEDIATELY
+                    await update_user(old_user_id_val, {
+                        "subscription_status": "free",
+                        "subscription_end": None,
+                        "subscription_source": None
+                    })
 
         success = await link_telegram_account(user_id, telegram_id)
         
@@ -808,13 +949,14 @@ async def unlink_telegram_endpoint(data: Dict = Body(...)):
         
         # 2. Reset Premium Status if it was inherited from Telegram
         user = await get_user_by_id(user_id)
-        if user and user.get("subscription_source") == "telegram":
-            await update_user(user_id, {
-                "subscription_status": "free",
-                "subscription_end": None,
-                "subscription_source": None
-            })
-            print(f"[LINK] Reset premium status for user {user_id} after unlinking Telegram")
+        if user and user.get("subscription_source") == "telegram" or (user and user.get("subscription_status") == "active" and user.get("subscription_source") == None):
+             # Force reset if linked to Telegram even if source is missing (safety)
+             await update_user(user_id, {
+                 "subscription_status": "free",
+                 "subscription_end": None,
+                 "subscription_source": None
+             })
+             print(f"[LINK] Reset premium status for user {user_id} after unlinking Telegram")
 
         if response.status_code in [200, 204]:
              return {"success": True, "message": "Unlinked successfully and premium status reset."}
@@ -951,7 +1093,7 @@ async def background_notification_worker():
                             
                             if target_tokens:
                                 print(f"[PUSH] Sending to {len(set(target_tokens))} devices...")
-                                await send_expo_push_notification(list(set(target_tokens)), final_title, body, {"product_id": msg["id"]})
+                                await send_expo_push_notification(list(set(target_tokens)), final_title, body, {"product_id": str(msg["id"])})
                         
                         LAST_PUSH_CHECK_TIME = datetime.now(timezone.utc)
             except Exception as e:
@@ -972,8 +1114,11 @@ async def login(background_tasks: BackgroundTasks, data: Dict = Body(...)):
     stored_hash = user.get("password_hash")
     if not stored_hash or stored_hash != hash_password(password): raise HTTPException(status_code=401, detail="Invalid email or password")
     
-    # AUTO-TRIGGER verification if not verified
     is_verified = user.get("email_verified", False)
+    is_premium = user.get("subscription_status") == "active"
+    subscription_end = user.get("subscription_end")
+    
+    # AUTO-TRIGGER verification if not verified
     if not is_verified:
         print(f"[AUTH] Unverified login for {email}, triggering background code")
         background_tasks.add_task(trigger_email_verification, email)
@@ -982,10 +1127,19 @@ async def login(background_tasks: BackgroundTasks, data: Dict = Body(...)):
         "success": True, 
         "user": {
             "id": user["id"], 
-            "email": user["email"], 
-            "isPremium": user.get("subscription_status") == "active", 
-            "subscriptionEnd": user.get("subscription_end"),
-            "email_verified": is_verified
+            "email": user["email"],
+            "name": user.get("name"),
+            "bio": user.get("bio"),
+            "location": user.get("location"),
+            "avatar_url": user.get("avatar_url"),
+            "is_premium": is_premium,
+            "isPremium": is_premium, 
+            "subscription_status": user.get("subscription_status", "free"),
+            "status": user.get("subscription_status", "free"),
+            "subscription_end": subscription_end,
+            "subscriptionEnd": subscription_end,
+            "email_verified": is_verified,
+            "is_verified": is_verified
         }
     }
 
@@ -1121,7 +1275,8 @@ def extract_product(msg, channel_map):
 
             name_lower = name.lower()
             matches = re.findall(r'[\d,.]+', val)
-            num = matches[-1].replace(',', '') if matches else None
+            # Use the FIRST match as the primary price (e.g. "39.95 CAD (29.29 USD)" -> 39.95)
+            num = matches[0].replace(',', '') if matches else None
 
             is_redundant = False
             if num:
@@ -1253,28 +1408,36 @@ async def get_categories():
         result[region].insert(0, "ALL")
     return {"categories": result, "source": source, "channel_count": len(channels)}
 
-@app.get("/v1/feed")
-async def get_feed(user_id: str, region: Optional[str] = "ALL", category: Optional[str] = "ALL", offset: int = 0, limit: int = 20, country: Optional[str] = None, search: Optional[str] = None):
-    if country and (not region or region == "ALL"): region = country
+async def get_channels_data():
+    """Helper to fetch channels from storage or local fallback"""
     channels = []
     try:
         storage_url = f"{URL}/storage/v1/object/authenticated/monitor-data/discord_josh/channels.json"
         channels_response = await http_client.get(storage_url, headers=HEADERS)
         if channels_response.status_code == 200: channels = channels_response.json() or []
     except: pass
+    
     if not channels:
         for filename in ["data/channels_.json", "data/channels.json", "channels.json"]:
             if os.path.exists(filename):
                 try:
-                    with open(filename, "r") as f: channels = json.load(f)
-                    if channels: break
+                    with open(filename, "r") as f: 
+                        channels = json.load(f)
+                        if channels: break
                 except: continue
-    if not channels: channels = DEFAULT_CHANNELS
+    return channels or DEFAULT_CHANNELS
+
+@app.get("/v1/feed")
+async def get_feed(user_id: str, background_tasks: BackgroundTasks, region: Optional[str] = "ALL", category: Optional[str] = "ALL", offset: int = 0, limit: int = 20, country: Optional[str] = None, search: Optional[str] = None):
+    if country and (not region or region == "ALL"): region = country
+    channels = await get_channels_data()
+    
     channel_map = {}
     for c in channels:
         if c.get('enabled', True): channel_map[c['id']] = {'category': c.get('category', 'USA Stores').strip(), 'name': c.get('name', 'Unknown').strip()}
     for c in DEFAULT_CHANNELS:
         if c['id'] not in channel_map: channel_map[c['id']] = {'category': c.get('category', 'USA Stores').strip(), 'name': c.get('name', 'Unknown').strip()}
+    
     target_ids = []
     if region and region.strip().upper() != "ALL":
         req_reg = region.strip().upper()
@@ -1292,81 +1455,127 @@ async def get_feed(user_id: str, region: Optional[str] = "ALL", category: Option
     if target_ids: id_filter = f"&channel_id=in.({','.join(target_ids)})"
     premium_user = False
     try:
-        user = await get_user_by_id(user_id)
-        if user and user.get("subscription_status") == "active": premium_user = True
+        premium_user = await verify_premium_status(user_id, background_tasks=background_tasks)
     except Exception as e: print(f"[FEED] Quota check error: {e}")
     all_products = []
     seen_signatures = set()
     current_sql_offset = offset
     chunks_scanned = 0
-    base_max = 12 if premium_user else 6
-    max_chunks = base_max * 8 if search else base_max
+    # Increase scan depth for searches (Premium gets 1,000,000 message potential lookback)
+    # Each request scans a chunk; has_more lets them keep "digging"
+    base_max = 50 if premium_user else 30
+    search_multiplier = 20 if search else 1
+    max_chunks = base_max * search_multiplier
+    batch_limit = 1000 if search else 50 # Much larger batches during search for speed
+    
+    db_end_reached = False
     while len(all_products) < limit and chunks_scanned < max_chunks:
-        batch_limit = 50
-        query = f"order=scraped_at.desc&offset={current_sql_offset}&limit={batch_limit}{id_filter}"
-        if search and search.strip():
-            keywords = [k.strip() for k in search.split() if len(k.strip()) > 1]
+        search_is_active = bool(search and search.strip())
+        query = f"order=scraped_at.desc&offset={current_sql_offset}&limit={batch_limit}"
+        
+        # Region/Category Filter ONLY if NOT searching (to make search truly GLOBAL)
+        if id_filter and not search_is_active:
+             query += id_filter
+             
+        if search_is_active:
+            keywords = [k.strip() for k in search.split() if len(k.strip()) >= 1]
             if keywords:
                 or_parts = []
                 for k in keywords:
+                    # Optimized SQL Filter (Titles, Descriptions, Content, and Core Fields)
                     or_parts.append(f"content.ilike.*{k}*")
                     or_parts.append(f"raw_data->embeds->0->>title.ilike.*{k}*")
                     or_parts.append(f"raw_data->embeds->0->>description.ilike.*{k}*")
+                    or_parts.append(f"raw_data->embed->>title.ilike.*{k}*")
+                    or_parts.append(f"raw_data->embed->>description.ilike.*{k}*")
+                    # Added back critical field checks for monitors that use them
+                    or_parts.append(f"raw_data->embeds->0->fields->0->>value.ilike.*{k}*")
+                    or_parts.append(f"raw_data->embeds->0->fields->1->>value.ilike.*{k}*")
+                    or_parts.append(f"raw_data->embeds->0->author->>name.ilike.*{k}*")
                 query += f"&or=({','.join(or_parts)})"
+                
         try:
             response = await http_client.get(f"{URL}/rest/v1/discord_messages?{query}", headers=HEADERS)
-            if response.status_code != 200: break
+            if response.status_code != 200: 
+                print(f"[FEED] Error {response.status_code}: {response.text}")
+                break
             messages = response.json()
-            if not messages: break
+            if not messages: 
+                db_end_reached = True
+                break
+                
             for msg in messages:
                 sig = _get_content_signature(msg)
                 if sig in seen_signatures: continue
                 prod = extract_product(msg, channel_map)
                 if not prod: continue
+                
+                # Product refinement
                 p_data = prod.get("product_data", {})
                 price_val = p_data.get("price")
                 resale_val = p_data.get("resell")
                 was_val = p_data.get("was_price")
                 has_image = p_data.get("image") and "placeholder" not in p_data.get("image")
                 has_links = bool(p_data.get("buy_url") or (p_data.get("links") and any(p_data["links"].values())))
+                
                 try:
                     p_num = float(str(price_val or 0).replace(',', ''))
                     r_num = float(str(resale_val or 0).replace(',', ''))
                     w_num = float(str(was_val or 0).replace(',', ''))
                     has_any_price = p_num > 0 or r_num > 0 or w_num > 0
                 except (ValueError, TypeError): has_any_price = bool(price_val or resale_val or was_val)
-                if not has_image and not has_links and not has_any_price: continue
-                if search and search.strip():
+                
+                # Product qualification: MUST have an image OR a price OR a buy link (matching Home Feed)
+                if not (has_image or has_any_price or has_links): continue
+                
+                # Final Keyword Filter (OR logic on text blob)
+                if search_is_active:
                     search_keywords = [k.lower().strip() for k in search.split() if k.strip()]
-                    title_low = prod["product_data"]["title"].lower()
-                    desc_low = prod["product_data"]["description"].lower()
-                    cat_low = prod["category_name"].lower()
-                    ret_low = (prod.get("product_data", {}).get("retailer") or "").lower()
+                    search_blob = f"{prod['product_data'].get('title','')}\n{prod['product_data'].get('description','')}\n{prod.get('category_name','')}"
+                    for detail in prod["product_data"].get("details", []):
+                        search_blob += f"\n{detail.get('label','')}: {detail.get('value','')}"
+                    
+                    search_blob = search_blob.lower()
                     match_found = False
                     for kw in search_keywords:
-                        if kw in title_low or kw in desc_low or kw in cat_low or kw in ret_low:
+                        if kw in search_blob:
                             match_found = True
                             break
                     if not match_found: continue
-                if region and region.strip().upper() != "ALL":
-                    if prod["region"].strip() != region.strip(): continue
-                if category and category.strip().upper() != "ALL":
-                    if prod["category_name"].upper().strip() != category.upper().strip(): continue
+
+                # Normal View Filtering (NOT for search)
+                if not search_is_active:
+                    if region and region.strip().upper() != "ALL":
+                        if prod["region"].strip() != region.strip(): continue
+                    if category and category.strip().upper() != "ALL":
+                        if prod["category_name"].upper().strip() != category.upper().strip(): continue
+                
                 all_products.append(prod)
                 seen_signatures.add(sig)
                 if len(all_products) >= limit: break
+            
             current_sql_offset += len(messages)
             chunks_scanned += 1
-            if len(messages) < batch_limit: break
+            # If we didn't find enough products but haven't hit the end, keep scanning
+            if len(messages) < batch_limit: 
+                db_end_reached = True
+                break
         except Exception as e:
             print(f"[FEED] Error in batch fetch: {e}")
             break
+
+    # Search Paging Logic:
+    has_more = not db_end_reached
+    
     if not premium_user:
-        if offset >= 4: return {"products": [], "next_offset": offset, "has_more": False, "is_premium": False, "total_count": offset + len(all_products)}
-        all_products = all_products[:4 - offset]
+        # Limit free users to 4 products total
+        if len(all_products) > 4:
+            all_products = all_products[:4]
+            has_more = False
         for product in all_products: product["is_locked"] = False
-    print(f"[FEED] Scan complete. Found {len(all_products)} products after scanning {current_sql_offset - offset} messages.")
-    return {"products": all_products, "next_offset": current_sql_offset, "has_more": premium_user and (len(all_products) >= limit), "is_premium": premium_user, "total_count": 100}
+        
+    print(f"[FEED] Search/Feed complete. Found {len(all_products)} products scanning {current_sql_offset - offset} messages.")
+    return {"products": all_products, "next_offset": current_sql_offset, "has_more": has_more, "is_premium": premium_user, "total_count": 100}
 
 @app.get("/v1/user/status")
 async def get_user_status(user_id: str):
@@ -1455,9 +1664,12 @@ async def get_product_detail(product_id: str = Query(...)):
             msg = response.json()[0]
             
             # 2. Extract using existing logic
-            channel_map = await get_channels_data()
-            prod = extract_product(msg, channel_map)
+            channels = await get_channels_data()
+            channel_map = {}
+            for c in channels:
+                channel_map[c['id']] = {'category': c.get('category', 'USA Stores'), 'name': c.get('name', 'Unknown')}
             
+            prod = extract_product(msg, channel_map)
             if prod:
                 return {"success": True, "product": prod}
         
@@ -1465,6 +1677,107 @@ async def get_product_detail(product_id: str = Query(...)):
     except Exception as e:
         print(f"[PRODUCT] Error fetching detail: {e}")
         return {"success": False, "message": str(e)}
+
+@app.get("/share/{product_id}", response_class=HTMLResponse)
+async def share_product_page(product_id: str):
+    """Render a premium landing page for shared products with deep link support"""
+    detail_res = await get_product_detail(product_id)
+    if not detail_res.get("success"):
+        return f"<html><head><title>Deal Not Found</title></head><body style='background:#0A0A0B;color:white;text-align:center;padding-top:100px;'><h1>Deal Expired or Not Found</h1><p>This deal may have been removed or is no longer available.</p></body></html>"
+    
+    prod = detail_res["product"]
+    data = prod.get("product_data", {})
+    title = data.get("title", "HollowScan Deal")
+    desc = data.get("description", "Check out this deal on HollowScan!")
+    img = data.get("image") or "https://hollowscan.com/icon.png"
+    
+    # Robust price display for web
+    price_val = data.get("price")
+    currency = "£" if "UK" in prod.get("region", "") else "$"
+    display_price = f"{currency}{price_val}" if price_val else "Check Price"
+    
+    region = prod.get("region", "USA")
+    deep_link = f"hollowscan://product/{product_id}"
+
+    # Construct HTML with premium feel and OG tags
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>{title} | HollowScan</title>
+        
+        <!-- Open Graph / Social Previews -->
+        <meta property="og:type" content="website">
+        <meta property="og:title" content="{title}">
+        <meta property="og:description" content="{desc[:150]}...">
+        <meta property="og:image" content="{img}">
+        <meta name="twitter:card" content="summary_large_image">
+        
+        <style>
+            body {{
+                margin: 0; padding: 0;
+                background-color: #0A0A0B;
+                color: #FAFAFA;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                display: flex; justify-content: center; align-items: center;
+                min-height: 100vh;
+                text-align: center;
+            }}
+            .card {{
+                max-width: 400px; width: 90%;
+                background: rgba(255, 255, 255, 0.03);
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 24px; padding: 32px;
+                backdrop-filter: blur(10px);
+                box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+            }}
+            .image-box {{
+                width: 100%; border-radius: 16px; 
+                background: #1C1C1E; overflow: hidden;
+                margin-bottom: 24px; border: 1px solid rgba(255,255,255,0.05);
+            }}
+            .image-box img {{ width: 100%; display: block; }}
+            h1 {{ font-size: 22px; font-weight: 800; margin-bottom: 8px; line-height: 1.3; }}
+            .price {{ color: #3B82F6; font-size: 24px; font-weight: 900; margin-bottom: 20px; }}
+            .btn {{
+                background: #3B82F6; color: white;
+                text-decoration: none; font-weight: 800;
+                padding: 16px 32px; border-radius: 14px;
+                display: block; transition: transform 0.2s;
+                font-size: 16px;
+            }}
+            .btn:active {{ transform: scale(0.96); }}
+            .footer {{ margin-top: 32px; font-size: 12px; opacity: 0.5; }}
+        </style>
+        
+        <script>
+            // Auto-redirect to app
+            window.onload = function() {{
+                setTimeout(function() {{
+                    window.location.href = "{deep_link}";
+                }}, 500);
+            }};
+        </script>
+    </head>
+    <body>
+        <div class="card">
+            <div class="image-box">
+                <img src="{img}" alt="Product image">
+            </div>
+            <h1>{title}</h1>
+            <div class="price">{display_price}</div>
+            <a href="{deep_link}" class="btn">Open in HollowScan App</a>
+            <div class="footer">
+                Shared via HollowScan Deals • {region}
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return html
+
 
 @app.get("/health")
 async def health_check():

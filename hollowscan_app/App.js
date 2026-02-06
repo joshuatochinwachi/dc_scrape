@@ -9,6 +9,7 @@ import * as Linking from 'expo-linking';
 import { SavedProvider } from './context/SavedContext';
 import { UserProvider, UserContext } from './context/UserContext';
 import Constants from './Constants';
+import { navigationRef } from './services/NavigationService';
 
 // Screens
 import HomeScreen from './screens/HomeScreen';
@@ -22,6 +23,7 @@ import SignupScreen from './screens/SignupScreen';
 import VerificationScreen from './screens/VerificationScreen';
 import ForgotPasswordScreen from './screens/ForgotPasswordScreen';
 import ChangePasswordScreen from './screens/ChangePasswordScreen';
+import TelegramLinkScreen from './screens/TelegramLinkScreen';
 import DailyLimitModal from './components/DailyLimitModal';
 
 
@@ -162,7 +164,11 @@ const NavigationRoot = ({ showSplash, setShowSplash, linking }) => {
       {showSplash ? (
         <SplashScreen onComplete={() => setShowSplash(false)} />
       ) : (
-        <NavigationContainer linking={linking} fallback={<SplashScreen onComplete={() => { }} />}>
+        <NavigationContainer
+          ref={navigationRef}
+          linking={linking}
+          fallback={<SplashScreen onComplete={() => { }} />}
+        >
           <StatusBar style={isDarkMode ? "light" : "dark"} />
           <Stack.Navigator screenOptions={{ headerShown: false }}>
             {user ? (
@@ -173,6 +179,7 @@ const NavigationRoot = ({ showSplash, setShowSplash, linking }) => {
                   <Stack.Screen name="Root" component={TabNavigator} />
                   <Stack.Screen name="ProductDetail" component={ProductDetailScreen} options={{ presentation: 'card' }} />
                   <Stack.Screen name="ChangePassword" component={ChangePasswordScreen} />
+                  <Stack.Screen name="TelegramLink" component={TelegramLinkScreen} />
                   <Stack.Screen name="ForgotPassword" component={ForgotPasswordScreen} />
                 </>
               )

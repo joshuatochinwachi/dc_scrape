@@ -43,9 +43,8 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "2f7823be-eb44-4956-8297-4969baf0a524"
+        "projectId": "7e28c380-d7d4-4f6d-82ab-4febe7aabf8e"
       }
-    },
-    "owner": "smartymetrics"
+    }
   }
 }

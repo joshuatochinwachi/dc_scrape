@@ -236,11 +236,17 @@ export const UserProvider = ({ children }) => {
             }
 
             // Update the user object with new status and verification
+            // Robust mapping to handle both snake_case and camelCase from backend
             const updatedUser = {
                 ...userRef.current, // Use most recent ref as base
-                isPremium: data.is_premium,
-                email_verified: data.email_verified,
-                subscription_status: data.status
+                name: data.name || userRef.current.name,
+                bio: data.bio || userRef.current.bio,
+                location: data.location || userRef.current.location,
+                avatar_url: data.avatar_url || userRef.current.avatar_url,
+                isPremium: data.is_premium !== undefined ? data.is_premium : data.isPremium,
+                email_verified: data.email_verified !== undefined ? data.email_verified : data.is_verified,
+                subscription_status: data.status !== undefined ? data.status : data.subscription_status,
+                subscription_end: data.subscription_end !== undefined ? data.subscription_end : data.subscriptionEnd
             };
 
             setUser(updatedUser);
@@ -274,7 +280,7 @@ export const UserProvider = ({ children }) => {
             if (userRef.current?.id) {
                 try {
                     const tokenData = await Notifications.getExpoPushTokenAsync({
-                        projectId: '2f7823be-eb44-4956-8297-4969baf0a524'
+                        projectId: '7e28c380-d7d4-4f6d-82ab-4febe7aabf8e'
                     });
                     if (tokenData && tokenData.data) {
                         await unregisterPushToken(userRef.current.id, tokenData.data);
@@ -333,17 +339,24 @@ export const UserProvider = ({ children }) => {
     };
 
     const trackProductView = async (productId) => {
-        try {
-            // Check if premium - bypass limit
-            // NEW: Use combined premium check (User subscription OR Telegram linking)
-            const isUserPremium = user?.isPremium || isPremiumTelegram;
-
-            if (isUserPremium) {
-                console.log('[LIMIT] Premium user - unlimited views');
-                return { allowed: true, remaining: Infinity };
+        // 1. Proactive Time-based Check (Client side)
+        // If we know their time is up or they aren't premium, check daily limit
+        if (!isPremium) {
+            // Check daily limit for free users
+            const remaining = getRemainingViews();
+            if (remaining <= 0) {
+                console.log('[LIMIT] Daily limit reached - showing modal');
+                setShowLimitModal(true);
+                // Trigger a background refresh just in case they JUST renewed
+                refreshUserStatus();
+                return { allowed: false, remaining: 0 };
             }
+        } else {
+            console.log('[LIMIT] Premium user - unlimited views');
+        }
 
-            // Get current daily views
+        try {
+            // Get current daily views from local storage
             const stored = await AsyncStorage.getItem('daily_views');
             let current = stored ? JSON.parse(stored) : { date: new Date().toDateString(), products: [] };
 
@@ -352,33 +365,33 @@ export const UserProvider = ({ children }) => {
                 current = { date: new Date().toDateString(), products: [] };
             }
 
-            // STRICT ENFORCEMENT: Check if limit reached FIRST
-            // (User wants to block even already-viewed items once limit is hit)
-            if (current.products.length >= FREE_PRODUCT_LIMIT) {
-                console.log('[LIMIT] Daily limit reached (', current.products.length, '/', FREE_PRODUCT_LIMIT, ')');
-                setShowLimitModal(true); // Trigger modal globally
-                return { allowed: false, remaining: 0 };
+            // If not already in the list, add it
+            if (!current.products.includes(productId)) {
+                current.products.push(productId);
+                await AsyncStorage.setItem('daily_views', JSON.stringify(current));
+                setDailyViews(current);
+
+                // Track on server too (for analytics/sync)
+                fetch(`${Constants.API_BASE_URL}/v1/user/views/track`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: user?.id || 'guest', product_id: productId })
+                }).catch(e => console.log('[VIEW] Server track error:', e));
             }
 
-            // Check if product already viewed today
-            if (current.products.includes(productId)) {
-                console.log('[LIMIT] Product already viewed today');
-                const remaining = FREE_PRODUCT_LIMIT - current.products.length;
-                return { allowed: true, remaining };
-            }
+            // TRIGGER BACKGROUND STATUS REFRESH
+            // This ensures that if their premium was revoked or expired, 
+            // the state will be updated for the NEXT view action.
+            refreshUserStatus();
+            checkTelegramStatus().catch(() => { });
 
-
-            // Add product to viewed list
-            current.products.push(productId);
-            setDailyViews(current);
-            await AsyncStorage.setItem('daily_views', JSON.stringify(current));
-
-            const remaining = FREE_PRODUCT_LIMIT - current.products.length;
-            console.log('[LIMIT] View tracked. Remaining:', remaining);
-            return { allowed: true, remaining };
+            return {
+                allowed: true,
+                remaining: isPremium ? Infinity : Math.max(0, FREE_PRODUCT_LIMIT - current.products.length)
+            };
         } catch (error) {
-            console.error('[LIMIT] Error tracking view:', error);
-            return { allowed: true, remaining: -1 };
+            console.error('[VIEW] Error tracking view:', error);
+            return { allowed: true }; // Optimistic on error
         }
     };
 
@@ -503,6 +516,10 @@ export const UserProvider = ({ children }) => {
                 setTelegramLinked(false);
                 setIsPremiumTelegram(false);
                 setPremiumUntil(null);
+
+                // Sync with main user state too (e.g. if link was transferred)
+                refreshUserStatus();
+
                 return { linked: false };
             }
         } catch (error) {
@@ -511,6 +528,10 @@ export const UserProvider = ({ children }) => {
             setTelegramLinked(false);
             setIsPremiumTelegram(false);
             setPremiumUntil(null);
+
+            // Try to refresh main user status too
+            refreshUserStatus();
+
             return { linked: false, error: error.message };
         }
     };
@@ -538,6 +559,33 @@ export const UserProvider = ({ children }) => {
         }
     };
 
+    const updateUserProfile = async (profileData) => {
+        if (!user?.id) return { success: false, message: 'User not logged in' };
+        try {
+            const response = await fetch(`${Constants.API_BASE_URL}/v1/user/profile`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user_id: user.id,
+                    ...profileData
+                }),
+            });
+            const data = await response.json();
+
+            if (data.success) {
+                // Optimistically update local state immediately
+                const updatedUser = { ...user, ...profileData };
+                setUser(updatedUser);
+                await AsyncStorage.setItem('user_data', JSON.stringify(updatedUser));
+            }
+
+            return data;
+        } catch (error) {
+            console.error('[USER] Error updating profile:', error);
+            return { success: false, message: 'Connection error' };
+        }
+    };
+
 
     const resetDailyViews = async () => {
         const newData = {
@@ -558,7 +606,32 @@ export const UserProvider = ({ children }) => {
         }
     };
 
-    const isPremium = user?.isPremium || isPremiumTelegram || false;
+    // Unified getter for isPremium - considers both App DB and Telegram Link
+    // ADDED: Time-based check and Link-status check to ensure revocation
+    const isPremium = (() => {
+        const now = new Date();
+
+        // 1. Check App-level subscription
+        // If source is telegram, we MUST have telegramLinked = true
+        if (user?.isPremium && user?.subscriptionEnd) {
+            const isTelegramSource = user?.subscriptionSource === 'telegram';
+            if (isTelegramSource && !telegramLinked) {
+                // Ignore this premium status if link is gone and it was the only source
+                console.log('[STRICT] User marked premium via Telegram but not linked - ignoring.');
+            } else {
+                const expiry = new Date(user.subscriptionEnd);
+                if (expiry > now) return true;
+            }
+        }
+
+        // 2. Check Telegram-level subscription (Local sync state)
+        if (isPremiumTelegram && premiumUntil && telegramLinked) {
+            const expiry = new Date(premiumUntil);
+            if (expiry > now) return true;
+        }
+
+        return false;
+    })();
 
 
     return (
@@ -572,6 +645,7 @@ export const UserProvider = ({ children }) => {
                 trackProductView,
                 getRemainingViews,
                 updateUser,
+                updateUserProfile, // New profile update function
                 resetDailyViews,
                 isPremium,
                 login,

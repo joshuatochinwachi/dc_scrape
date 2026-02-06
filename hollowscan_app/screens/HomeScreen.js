@@ -45,7 +45,7 @@ const getRelativeTime = (dateString) => {
 
 const HomeScreen = () => {
     const navigation = useNavigation();
-    const { user, isDarkMode, getRemainingViews, trackProductView, isPremium: userIsPremium, telegramLinked, checkTelegramStatus, selectedRegion, updateRegion } = useContext(UserContext);
+    const { user, isDarkMode, getRemainingViews, trackProductView, isPremium: userIsPremium, telegramLinked, checkTelegramStatus, refreshUserStatus, selectedRegion, updateRegion } = useContext(UserContext);
 
     // CONFIG
     const LIMIT = 10;
@@ -126,14 +126,16 @@ const HomeScreen = () => {
 
     // HANDLERS
     const handleSearch = async (query = searchQuery) => {
-
-
-        // Alert.alert("Debug", "Search Triggered: " + query);
         Keyboard.dismiss();
+
+        // If query is empty, treat it as a clear/reset
         if (!query || !query.trim()) {
-            // Alert.alert("Debug", "Empty Query");
+            setIsLoading(true);
+            await fetchAlerts(0, true, '');
+            setIsLoading(false);
             return;
         }
+
         try {
             setIsLoading(true);
             await fetchAlerts(0, true, query);
@@ -209,7 +211,10 @@ const HomeScreen = () => {
         await Promise.all([
             fetchCategories(),
             fetchUserStatus(),
-            fetchAlerts(0, true)
+            fetchAlerts(0, true),
+            // Background sync context to catch expiry even if Profile isn't opened
+            checkTelegramStatus(),
+            refreshUserStatus()
         ]);
 
         setIsLoading(false);
@@ -555,7 +560,10 @@ const HomeScreen = () => {
                             placeholderTextColor={colors.textSecondary}
                             style={[styles.searchInput, { color: colors.text }]}
                             value={searchQuery}
-                            onChangeText={setSearchQuery}
+                            onChangeText={(text) => {
+                                setSearchQuery(text);
+                                if (!text) handleSearch('');
+                            }}
                             onSubmitEditing={() => handleSearch()}
                             returnKeyType="search"
                         />
@@ -577,49 +585,51 @@ const HomeScreen = () => {
                     </LinearGradient>
                 </View>
 
-                {/* ROW 2: CONTROLS (Common line for Regions and Categories) */}
-                <View style={styles.controlsRow}>
-                    {/* COMPACT REGION SELECTOR */}
-                    <View style={styles.regionTabs}>
-                        {regions.map(r => {
-                            const isActive = viewRegion === r.id; // Use local viewRegion
-                            return (
-                                <TouchableOpacity
-                                    key={r.id}
-                                    onPress={() => setViewRegion(r.id)} // Only update local viewRegion
-                                    style={[
-                                        styles.regionTab,
-                                        isActive && { backgroundColor: isDarkMode ? '#333' : '#FFF', borderColor: brand.BLUE, borderWidth: 1 }
-                                    ]}
-                                >
-                                    <Text style={{ fontSize: 16 }}>{r.flag}</Text>
-                                    <Text style={[
-                                        styles.regionTabText,
-                                        { color: isActive ? colors.text : colors.textSecondary, fontWeight: isActive ? '900' : '600' }
-                                    ]}>
-                                        {r.label}
-                                    </Text>
-                                </TouchableOpacity>
-                            );
-                        })}
+                {/* ROW 2: CONTROLS (Only show if NOT searching) */}
+                {!searchQuery && (
+                    <View style={styles.controlsRow}>
+                        {/* COMPACT REGION SELECTOR */}
+                        <View style={styles.regionTabs}>
+                            {regions.map(r => {
+                                const isActive = viewRegion === r.id; // Use local viewRegion
+                                return (
+                                    <TouchableOpacity
+                                        key={r.id}
+                                        onPress={() => setViewRegion(r.id)} // Only update local viewRegion
+                                        style={[
+                                            styles.regionTab,
+                                            isActive && { backgroundColor: isDarkMode ? '#333' : '#FFF', borderColor: brand.BLUE, borderWidth: 1 }
+                                        ]}
+                                    >
+                                        <Text style={{ fontSize: 16 }}>{r.flag}</Text>
+                                        <Text style={[
+                                            styles.regionTabText,
+                                            { color: isActive ? colors.text : colors.textSecondary, fontWeight: isActive ? '900' : '600' }
+                                        ]}>
+                                            {r.label}
+                                        </Text>
+                                    </TouchableOpacity>
+                                );
+                            })}
+                        </View>
+
+                        <View style={[styles.verticalDivider, { backgroundColor: colors.border }]} />
+
+                        <TouchableOpacity
+                            onPress={() => setFilterVisible(true)}
+                            activeOpacity={0.7}
+                            style={[styles.filterBtn, { backgroundColor: colors.card, borderColor: colors.border }]}
+                        >
+                            <Text style={{ fontSize: 16, marginRight: 6 }}>⚡</Text>
+                            <Text style={[styles.filterBtnText, { color: colors.text }]}>
+                                {selectedCategories.includes('ALL')
+                                    ? 'All Categories'
+                                    : `${selectedCategories.length} Selected`}
+                            </Text>
+                            <Text style={{ fontSize: 12, marginLeft: 6, color: brand.BLUE }}>▼</Text>
+                        </TouchableOpacity>
                     </View>
-
-                    <View style={[styles.verticalDivider, { backgroundColor: colors.border }]} />
-
-                    <TouchableOpacity
-                        onPress={() => setFilterVisible(true)}
-                        activeOpacity={0.7}
-                        style={[styles.filterBtn, { backgroundColor: colors.card, borderColor: colors.border }]}
-                    >
-                        <Text style={{ fontSize: 16, marginRight: 6 }}>⚡</Text>
-                        <Text style={[styles.filterBtnText, { color: colors.text }]}>
-                            {selectedCategories.includes('ALL')
-                                ? 'All Categories'
-                                : `${selectedCategories.length} Selected`}
-                        </Text>
-                        <Text style={{ fontSize: 12, marginLeft: 6, color: brand.BLUE }}>▼</Text>
-                    </TouchableOpacity>
-                </View>
+                )}
             </View>
 
             {/* EMAIL VERIFICATION BANNER REMOVED - REPLACED BY FULL SCREEN GATE */}
@@ -644,15 +654,27 @@ const HomeScreen = () => {
                     ListFooterComponent={() => {
                         if (isLoadingMore) return <ActivityIndicator color={brand.BLUE} style={{ marginVertical: 20 }} />;
                         if (!userIsPremium && alerts.length >= 4) {
-                            // Compact Paywall for Horizontal Layout
+                            // Compact Paywall with Dual Options
                             return (
-                                <View style={[styles.paywallCompact, { backgroundColor: colors.card, borderColor: colors.border }]}>
-                                    <Text style={[styles.paywallText, { color: colors.text }]}>
-                                        🔒 <Text style={{ fontWeight: 'bold' }}>Unlock all {totalAvailable}+ deals</Text>
+                                <View style={[styles.paywallCompact, { backgroundColor: colors.card, borderColor: colors.border, flexDirection: 'column', alignItems: 'center', gap: 12 }]}>
+                                    <Text style={[styles.paywallText, { color: colors.text, textAlign: 'center' }]}>
+                                        🔒 <Text style={{ fontWeight: 'bold' }}>Unlock all {totalAvailable}+ daily deals</Text>
                                     </Text>
-                                    <TouchableOpacity style={{ backgroundColor: brand.BLUE, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20 }}>
-                                        <Text style={{ color: '#FFF', fontWeight: 'bold', fontSize: 12 }}>UPGRADE</Text>
-                                    </TouchableOpacity>
+                                    <View style={{ flexDirection: 'row', gap: 10, width: '100%', justifyContent: 'center' }}>
+                                        <TouchableOpacity
+                                            onPress={() => Alert.alert('Payment Method', 'Google Pay integration is coming soon! Please link your Telegram account to subscribe via our automated bot for now.')}
+                                            style={{ flex: 1, maxWidth: 140, backgroundColor: isDarkMode ? '#FFF' : '#111', paddingVertical: 10, borderRadius: 12, alignItems: 'center', flexDirection: 'row', justifyContent: 'center', gap: 6 }}
+                                        >
+                                            <Text style={{ color: isDarkMode ? '#000' : '#FFF', fontWeight: '800', fontSize: 13 }}>Google Pay</Text>
+                                        </TouchableOpacity>
+
+                                        <TouchableOpacity
+                                            onPress={() => navigation.navigate('TelegramLink')}
+                                            style={{ flex: 1, maxWidth: 140, backgroundColor: '#0088cc', paddingVertical: 10, borderRadius: 12, alignItems: 'center', justifyContent: 'center' }}
+                                        >
+                                            <Text style={{ color: '#FFF', fontWeight: '800', fontSize: 13 }}>Telegram Link</Text>
+                                        </TouchableOpacity>
+                                    </View>
                                 </View>
                             );
                         }

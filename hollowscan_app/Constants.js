@@ -4,8 +4,8 @@
 const Constants = {
     // ⚠️ 'localhost' does not work on a physical phone.
     // We use your local IP so your phone can talk to your computer.
-    // API_BASE_URL: 'https://web-production-18cf1.up.railway.app',
-    API_BASE_URL: 'http://10.246.149.243:8000',
+    API_BASE_URL: 'https://product.hollowscan.com',// 'https://web-production-18cf1.up.railway.app',
+    // API_BASE_URL: 'http://10.246.149.243:8000',
 
     BRAND: {
         BLUE: '#4F46E5', // Vivid Indigo-Blue
@@ -15,8 +15,8 @@ const Constants = {
         LIGHT_BG: '#F8F9FE',
     },
 
-    TELEGRAM_BOT: 'hollowscan_bot' // Replace with your bot's username
-    // TELEGRAM_BOT: 'ismartytest_bot'
+    TELEGRAM_BOT: 'hollowscan_bot', // Replace with your bot's username
+    SUPPORT_EMAIL: 'support@hollowscan.com'
 };
 
 export default Constants;
