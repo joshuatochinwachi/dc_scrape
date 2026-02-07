@@ -59,6 +59,16 @@ const ProfileScreen = () => {
     const [selectedAvatar, setSelectedAvatar] = useState(user?.avatar_url || null);
     const [isSaving, setIsSaving] = useState(false);
 
+    // Sync edit fields when user data loads/changes
+    useEffect(() => {
+        if (user) {
+            setEditName(user.name || '');
+            setEditBio(user.bio || '');
+            setEditLocation(user.location || '');
+            setSelectedAvatar(user.avatar_url || null);
+        }
+    }, [user]);
+
     // AVATAR PRESETS (DiceBear)
     const avatarPresets = [
         "https://api.dicebear.com/7.x/avataaars/png?seed=Felix",
@@ -411,8 +421,6 @@ const ProfileScreen = () => {
                 >
                     <Text style={styles.signOutText}>Sign Out</Text>
                 </TouchableOpacity>
-
-                <Text style={styles.version}>Version 1.0.4 • Build 152</Text>
             </ScrollView>
 
             {/* INFO MODAL */}

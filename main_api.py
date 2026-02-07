@@ -562,15 +562,6 @@ async def unregister_push_token(user_id: str = Query(...), token: str = Query(..
             
     return {"success": True}
 
-@app.post("/v1/user/preferences")
-async def update_preferences(user_id: str = Query(...), data: Dict = Body(...)):
-    """Sync notification preferences to DB"""
-    if not user_id: raise HTTPException(status_code=400, detail="User ID required")
-    
-    # data format: {"enabled": bool, "regions": {"USA Stores": ["ALL"], ...}}
-    success = await update_user(user_id, {"notification_preferences": data})
-    return {"success": success}
-
 @app.post("/v1/user/change-password")
 async def change_password(data: Dict = Body(...)):
     """Change user password (requires old password)"""
@@ -603,6 +594,10 @@ async def change_password(data: Dict = Body(...)):
 
 # Sends push notification via Expo Push API
 async def send_expo_push_notification(tokens: List[str], title: str, body: str, data: Dict = None):
+    """
+    Sends push notification via Expo Push API.
+    Sends individually to avoid PUSH_TOO_MANY_EXPERIENCE_IDS if tokens belong to different project IDs.
+    """
     if not tokens: return
     
     # Ensure http_client is ready
@@ -610,32 +605,47 @@ async def send_expo_push_notification(tokens: List[str], title: str, body: str, 
         print("[PUSH] Warning: http_client not initialized, skipping push.")
         return
 
-    message = {
-        "to": tokens,
-        "sound": "default",
-        "title": title,
-        "body": body,
-        "data": data or {},
-        "badge": 1,
-        "priority": "high",
-        "channelId": "default",
-        "ttl": 2419200
-    }
+    # Use a set to avoid duplicates
+    unique_tokens = list(set(tokens))
+    
+    for token in unique_tokens:
+        message = {
+            "to": token,
+            "sound": "default",
+            "title": title,
+            "body": body,
+            "data": data or {},
+            "badge": 1,
+            "priority": "high",
+            "channelId": "default",
+            "ttl": 2419200
+        }
 
-    try:
-        response = await http_client.post(
-            "https://exp.host/--/api/v2/push/send",
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
-            json=message
-        )
-        if response.status_code != 200:
-            print(f"[PUSH] Expo error: {response.text}")
-    except Exception as e:
-        # Catch ALL exceptions to prevent worker crash
-        print(f"[PUSH] Error sending push: {e}")
+        try:
+            response = await http_client.post(
+                "https://exp.host/--/api/v2/push/send",
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                json=message
+            )
+            
+            if response.status_code != 200:
+                print(f"[PUSH] Expo error for token {token[:15]}...: {response.text}")
+            else:
+                resp_data = response.json()
+                # Expo returns a 'data' array with ticket info
+                # If there's an error with a specific token (like it being unregistered), it will be in there
+                push_resp = resp_data.get("data", {})
+                if isinstance(push_resp, dict): # Single token response
+                    if push_resp.get("status") == "error":
+                        error_code = push_resp.get("details", {}).get("error")
+                        print(f"[PUSH] Token Error ({error_code}): {token[:20]}...")
+                        # If DeviceNotRegistered, we should ideally remove it, but for now we just log it.
+
+        except Exception as e:
+            print(f"[PUSH] Error sending to token {token[:15]}...: {e}")
 
 
 # --- BOT USERS CACHE ---
@@ -970,14 +980,6 @@ async def background_notification_worker():
     global LAST_PUSH_CHECK_TIME
     print("[PUSH] Worker started")
     
-    # Load tokens from file at startup
-    global USER_PUSH_TOKENS
-    try:
-        if os.path.exists("data/push_tokens.json"):
-            with open("data/push_tokens.json", "r") as f:
-                USER_PUSH_TOKENS = json.load(f)
-    except: pass
-
     while True:
         try:
             await asyncio.sleep(60) # Check every 60 seconds
@@ -987,31 +989,28 @@ async def background_notification_worker():
                  continue
                  
             try:
-                response = await http_client.get(f"{URL}/rest/v1/users?select=id,notification_preferences,push_tokens", headers=HEADERS)
+                # Query only users that HAVE push tokens
+                response = await http_client.get(
+                    f"{URL}/rest/v1/users?push_tokens=not.is.null&select=id,notification_preferences,push_tokens", 
+                    headers=HEADERS
+                )
                 
                 users_data = []
                 if response.status_code == 200:
-                    users_data = response.json()
+                    users_data = [u for u in response.json() if u.get("push_tokens")]
                 else:
-                    # Fallback to local memory tokens if DB columns aren't ready yet
-                    # Only log this once per restart to avoid spam
-                    if 'MIGRATION_WARNED' not in globals():
-                        print(f"[PUSH] Warning: User preferences DB columns missing (Status {response.status_code}). Using local cache.")
-                        print(f"       Please run the SQL migration to enable cloud sync.")
-                        globals()['MIGRATION_WARNED'] = True
-                    
-                    for uid, tokens in USER_PUSH_TOKENS.items():
-                        users_data.append({"id": uid, "push_tokens": tokens, "notification_preferences": {}})
+                    print(f"[PUSH] Error fetching users from DB: {response.status_code}")
+                    continue
             except Exception as e:
                 print(f"[PUSH] Error fetching users: {e}")
-                users_data = []
+                continue
             
             if not users_data:
                 continue
 
             # 2. Get latest products since LAST_PUSH_CHECK_TIME
-            # We check the last 5 messages to ensure we don't miss any during worker overlap
-            query = f"order=scraped_at.desc&limit=5"
+            # We fetch more than 5 to ensure coverage
+            query = f"order=scraped_at.desc&limit=20"
             try:
                 response = await http_client.get(f"{URL}/rest/v1/discord_messages?{query}", headers=HEADERS)
                 if response.status_code == 200 and response.json():
@@ -1025,7 +1024,13 @@ async def background_notification_worker():
                     if new_messages:
                         print(f"[PUSH] {len(new_messages)} new product(s) detected. Processing notifications...")
                         
+                        # Set to avoid duplicates if multiple messages arrive
+                        processed_ids = set()
+                        
                         for msg in new_messages:
+                            if msg.get("id") in processed_ids: continue
+                            processed_ids.add(msg.get("id"))
+                            
                             msg_region = msg.get("region", "USA Stores")
                             msg_category = msg.get("category_name", "General")
                             product_data = msg.get("product_data", {})
@@ -1034,66 +1039,69 @@ async def background_notification_worker():
                             title = product_data.get("title", "New Deal Detected!")
                             if len(title) > 50: title = title[:47] + "..."
                             
-                            # Generate sleek title with discount info
-                            raw_was = str(product_data.get("was_price", "") or product_data.get("resell_price", "") or "")
-                            raw_now = str(product_data.get("price", "") or "")
-                            
                             # Clean prices for logic
                             def clean_p(v):
-                                if not v or v.lower() in ["n/a", "0.0", "0"]: return 0
-                                return float(re.sub(r'[^0-9.]', '', v))
+                                if not v or str(v).lower() in ["n/a", "0.0", "0"]: return 0
+                                try:
+                                    return float(re.sub(r'[^0-9.]', '', str(v)))
+                                except: return 0
                             
-                            price_val = clean_p(raw_now)
-                            was_val = clean_p(raw_was)
+                            price_val = clean_p(product_data.get("price", ""))
+                            was_val = clean_p(product_data.get("was_price", "") or product_data.get("resell_price", ""))
                             
                             # Generate Prefix
                             prefix = "🔥"
+                            discount_pct = 0
                             if was_val > price_val and price_val > 0:
-                                discount = int(((was_val - price_val) / was_val) * 100)
-                                if discount >= 10:
-                                    prefix = f"📉 {discount}% OFF"
+                                discount_pct = int(((was_val - price_val) / was_val) * 100)
+                                if discount_pct >= 10:
+                                    prefix = f"📉 {discount_pct}% OFF"
                             
                             final_title = f"{prefix}: {title}"
                             
-                            # Enhanced informative body
+                            # Enhanced body
                             body_parts = []
                             if price_val > 0:
-                                body_parts.append(f"Price: ${raw_now}")
+                                body_parts.append(f"Price: ${product_data.get('price')}")
                             if was_val > 0 and was_val != price_val:
-                                body_parts.append(f"Market: ${raw_was}")
+                                body_parts.append(f"Market: ${product_data.get('was_price') or product_data.get('resell_price')}")
                             
-                            # Add Store/Region info
                             region_label = msg_region.replace(" Stores", "")
                             body_parts.append(f"{region_label} {msg_category}")
-                            
                             body = " | ".join(body_parts)
                             
-                            # Target specific users based on preferences
+                            # Target specific users based on their Preferences
                             target_tokens = []
                             for u in users_data:
                                 prefs = u.get("notification_preferences") or {}
                                 tokens = u.get("push_tokens")
                                 if not tokens: continue
                                 
-                                # Check master toggle (if stored in prefs)
-                                if prefs.get("enabled") == False: continue
+                                # 1. Enabled check
+                                if not prefs.get("enabled", True): continue
                                 
-                                # Check region/category filtering
-                                # Format: {"USA Stores": ["ALL"], "UK Stores": ["flips"]}
-                                user_regions = prefs.get("regions", {})
-                                if not user_regions: 
-                                    # Default: notify everyone if no prefs set (or you could be strict)
-                                    target_tokens.extend(tokens if isinstance(tokens, list) else [tokens])
-                                    continue
-                                    
-                                if msg_region in user_regions:
-                                    allowed_cats = user_regions[msg_region]
-                                    if "ALL" in allowed_cats or msg_category in allowed_cats:
-                                        target_tokens.extend(tokens if isinstance(tokens, list) else [tokens])
+                                # 2. Region check
+                                user_regions = prefs.get("regions", [])
+                                if user_regions and msg_region not in user_regions: continue
+                                
+                                # 3. Category check
+                                user_cats = prefs.get("categories", [])
+                                if user_cats and msg_category not in user_cats: continue
+                                
+                                # 4. Discount check
+                                min_disc = prefs.get("min_discount_percent", 0)
+                                if discount_pct < min_disc: continue
+                                
+                                # If we passed all checks, add tokens
+                                if isinstance(tokens, list):
+                                    target_tokens.extend(tokens)
+                                else:
+                                    target_tokens.append(tokens)
                             
                             if target_tokens:
-                                print(f"[PUSH] Sending to {len(set(target_tokens))} devices...")
-                                await send_expo_push_notification(list(set(target_tokens)), final_title, body, {"product_id": str(msg["id"])})
+                                unique_tokens = list(set(target_tokens))
+                                print(f"[PUSH] Sending to {len(unique_tokens)} devices for product: {title}")
+                                await send_expo_push_notification(unique_tokens, final_title, body, {"product_id": str(msg["id"])})
                         
                         LAST_PUSH_CHECK_TIME = datetime.now(timezone.utc)
             except Exception as e:
@@ -1101,7 +1109,7 @@ async def background_notification_worker():
                 
         except Exception as e:
             print(f"[PUSH] Worker error: {e}")
-            await asyncio.sleep(60) # Sleep before retry
+            await asyncio.sleep(60)
 
 
 @app.post("/v1/auth/login")
@@ -1777,6 +1785,153 @@ async def share_product_page(product_id: str):
     </html>
     """
     return html
+
+
+# ========================================
+# PUSH NOTIFICATION ENDPOINTS
+# ========================================
+
+@app.post("/v1/user/push-token")
+async def save_push_token(user_id: str, token: str):
+    """Save user's Expo push token for notifications"""
+    try:
+        # Fetch current push_tokens
+        response = await http_client.get(
+            f"{URL}/rest/v1/users?id=eq.{user_id}&select=push_tokens",
+            headers=HEADERS
+        )
+        
+        if response.status_code != 200:
+            raise HTTPException(status_code=500, detail="Failed to fetch user")
+        
+        users = response.json()
+        if not users:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        current_tokens = users[0].get("push_tokens") or []
+        
+        # Add token if not already present
+        if token not in current_tokens:
+            current_tokens.append(token)
+            
+            # Update database
+            update_response = await http_client.patch(
+                f"{URL}/rest/v1/users?id=eq.{user_id}",
+                headers=HEADERS,
+                json={"push_tokens": current_tokens}
+            )
+            
+            if update_response.status_code not in [200, 204]:
+                raise HTTPException(status_code=500, detail="Failed to save token")
+        
+        print(f"[PUSH] Saved token for user {user_id}")
+        return {"success": True, "message": "Push token saved"}
+    
+    except Exception as e:
+        print(f"[PUSH] Error saving token: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/v1/user/push-token")
+async def delete_push_token(user_id: str, token: str):
+    """Remove user's push token (on logout)"""
+    try:
+        # Fetch current push_tokens
+        response = await http_client.get(
+            f"{URL}/rest/v1/users?id=eq.{user_id}&select=push_tokens",
+            headers=HEADERS
+        )
+        
+        if response.status_code != 200:
+            return {"success": False, "message": "User not found"}
+        
+        users = response.json()
+        if not users:
+            return {"success": False, "message": "User not found"}
+        
+        current_tokens = users[0].get("push_tokens") or []
+        
+        # Remove token if present
+        if token in current_tokens:
+            current_tokens.remove(token)
+            
+            # Update database
+            update_response = await http_client.patch(
+                f"{URL}/rest/v1/users?id=eq.{user_id}",
+                headers=HEADERS,
+                json={"push_tokens": current_tokens}
+            )
+            
+            if update_response.status_code not in [200, 204]:
+                return {"success": False, "message": "Failed to remove token"}
+        
+        print(f"[PUSH] Removed token for user {user_id}")
+        return {"success": True, "message": "Push token removed"}
+    
+    except Exception as e:
+        print(f"[PUSH] Error removing token: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@app.get("/v1/user/notification-preferences")
+async def get_notification_preferences(user_id: str):
+    """Get user's notification preferences"""
+    try:
+        response = await http_client.get(
+            f"{URL}/rest/v1/users?id=eq.{user_id}&select=notification_preferences",
+            headers=HEADERS
+        )
+        
+        if response.status_code != 200:
+            raise HTTPException(status_code=500, detail="Failed to fetch preferences")
+        
+        users = response.json()
+        if not users:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        preferences = users[0].get("notification_preferences") or {
+            "enabled": True,
+            "regions": ["USA Stores", "UK Stores", "Canada Stores"],
+            "categories": [],  # Empty = all categories
+            "min_discount_percent": 0
+        }
+        
+        return {"success": True, "preferences": preferences}
+    
+    except Exception as e:
+        print(f"[PUSH] Error fetching preferences: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/v1/user/notification-preferences")
+@app.post("/v1/user/preferences")
+async def update_notification_preferences(user_id: str, preferences: Dict[str, Any] = Body(...)):
+    """Update user's notification preferences"""
+    try:
+        # Validate preferences structure
+        valid_preferences = {
+            "enabled": preferences.get("enabled", True),
+            "regions": preferences.get("regions", ["USA Stores", "UK Stores", "Canada Stores"]),
+            "categories": preferences.get("categories", []),
+            "min_discount_percent": preferences.get("min_discount_percent", 0)
+        }
+        
+        # Update database
+        response = await http_client.patch(
+            f"{URL}/rest/v1/users?id=eq.{user_id}",
+            headers=HEADERS,
+            json={"notification_preferences": valid_preferences}
+        )
+        
+        if response.status_code not in [200, 204]:
+            raise HTTPException(status_code=500, detail="Failed to update preferences")
+        
+        print(f"[PUSH] Updated preferences for user {user_id}: {valid_preferences}")
+        return {"success": True, "message": "Preferences updated", "preferences": valid_preferences}
+    
+    except Exception as e:
+        print(f"[PUSH] Error updating preferences: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/health")

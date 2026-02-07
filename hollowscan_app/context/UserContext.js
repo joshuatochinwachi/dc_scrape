@@ -260,7 +260,7 @@ export const UserProvider = ({ children }) => {
     const syncPreferences = async (preferences) => {
         if (!user?.id) return { success: false, message: 'User not logged in' };
         try {
-            const response = await fetch(`${Constants.API_BASE_URL}/v1/user/preferences?user_id=${user.id}`, {
+            const response = await fetch(`${Constants.API_BASE_URL}/v1/user/notification-preferences?user_id=${user.id}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(preferences),
