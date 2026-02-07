@@ -102,19 +102,28 @@ const AlertsScreen = () => {
     const syncWithCloud = async (enabled, subs) => {
         setIsSyncing(true);
         try {
-            const regionalPrefs = {};
+            const enabledRegions = [];
+            const enabledCategories = [];
+
             Object.keys(categories).forEach(region => {
                 const activeInRegion = categories[region]
                     .filter(sub => subs[sub])
                     .map(sub => sub);
+
                 if (activeInRegion.length > 0) {
-                    regionalPrefs[region] = activeInRegion;
+                    enabledRegions.push(region);
+                    activeInRegion.forEach(cat => {
+                        if (!enabledCategories.includes(cat)) {
+                            enabledCategories.push(cat);
+                        }
+                    });
                 }
             });
 
             await syncPreferences({
                 enabled: enabled,
-                regions: regionalPrefs
+                regions: enabledRegions,
+                categories: enabledCategories
             });
         } catch (error) {
             console.error('[ALERTS] Sync error:', error);

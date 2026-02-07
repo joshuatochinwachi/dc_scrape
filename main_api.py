@@ -1036,8 +1036,13 @@ async def background_notification_worker():
                             product_data = msg.get("product_data", {})
                             
                             # Professional Formatting
-                            title = product_data.get("title", "New Deal Detected!")
-                            if len(title) > 50: title = title[:47] + "..."
+                            raw_title = product_data.get("title")
+                            if not raw_title or str(raw_title).lower() in ["n/a", "none"]:
+                                title = "HollowScan Deal Alert"
+                            else:
+                                title = str(raw_title)
+                            
+                            if len(title) > 60: title = title[:57] + "..."
                             
                             # Clean prices for logic
                             def clean_p(v):
@@ -1048,26 +1053,36 @@ async def background_notification_worker():
                             
                             price_val = clean_p(product_data.get("price", ""))
                             was_val = clean_p(product_data.get("was_price", "") or product_data.get("resell_price", ""))
+
+                            # Qualification logic (matching Home Feed)
+                            has_image = product_data.get("image") and "placeholder" not in product_data.get("image")
+                            has_links = bool(product_data.get("buy_url") or (product_data.get("links") and any(product_data["links"].values())))
+                            has_any_price = price_val > 0 or was_val > 0
+
+                            if not (has_image or has_any_price or has_links):
+                                # Skip low-quality items that are filtered in feed
+                                continue
                             
-                            # Generate Prefix
-                            prefix = "🔥"
+                            # Generate Prefix / Badge
                             discount_pct = 0
                             if was_val > price_val and price_val > 0:
                                 discount_pct = int(((was_val - price_val) / was_val) * 100)
-                                if discount_pct >= 10:
-                                    prefix = f"📉 {discount_pct}% OFF"
                             
-                            final_title = f"{prefix}: {title}"
+                            if discount_pct >= 10:
+                                final_title = f"[{discount_pct}% OFF] {title}"
+                            else:
+                                final_title = title
                             
                             # Enhanced body
                             body_parts = []
                             if price_val > 0:
-                                body_parts.append(f"Price: ${product_data.get('price')}")
-                            if was_val > 0 and was_val != price_val:
-                                body_parts.append(f"Market: ${product_data.get('was_price') or product_data.get('resell_price')}")
+                                if was_val > price_val:
+                                    body_parts.append(f"Now: ${product_data.get('price')} (Was: ${product_data.get('was_price') or product_data.get('resell_price')})")
+                                else:
+                                    body_parts.append(f"Price: ${product_data.get('price')}")
                             
                             region_label = msg_region.replace(" Stores", "")
-                            body_parts.append(f"{region_label} {msg_category}")
+                            body_parts.append(f"Region: {region_label} | {msg_category}")
                             body = " | ".join(body_parts)
                             
                             # Target specific users based on their Preferences
