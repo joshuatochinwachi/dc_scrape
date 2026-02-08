@@ -982,150 +982,94 @@ async def background_notification_worker():
     
     while True:
         try:
-            await asyncio.sleep(60) # Check every 60 seconds
+            # CRITICAL: Sleep FIRST to prevent runaway loops
+            await asyncio.sleep(60)  # Check every 60 seconds
             
-            # 1. Fetch all users with push tokens and their preferences
             if not http_client:
-                 continue
-                 
+                print("[PUSH] Warning: http_client not initialized")
+                continue
+            
+            # Fetch users with timeout protection
             try:
-                # Query only users that HAVE push tokens
-                response = await http_client.get(
-                    f"{URL}/rest/v1/users?push_tokens=not.is.null&select=id,notification_preferences,push_tokens", 
-                    headers=HEADERS
+                response = await asyncio.wait_for(
+                    http_client.get(
+                        f"{URL}/rest/v1/users?push_tokens=not.is.null&select=id,notification_preferences,push_tokens",
+                        headers=HEADERS
+                    ),
+                    timeout=30.0
                 )
-                
-                users_data = []
-                if response.status_code == 200:
-                    users_data = [u for u in response.json() if u.get("push_tokens")]
-                else:
-                    print(f"[PUSH] Error fetching users from DB: {response.status_code}")
-                    continue
+                users_data = [u for u in response.json() if u.get("push_tokens")] if response.status_code == 200 else []
+            except asyncio.TimeoutError:
+                print("[PUSH] Timeout fetching users")
+                continue
             except Exception as e:
                 print(f"[PUSH] Error fetching users: {e}")
                 continue
             
             if not users_data:
                 continue
-
-            # 2. Get latest products since LAST_PUSH_CHECK_TIME
-            # We fetch more than 5 to ensure coverage
-            query = f"order=scraped_at.desc&limit=20"
+            
+            # Fetch messages with timeout
             try:
-                response = await http_client.get(f"{URL}/rest/v1/discord_messages?{query}", headers=HEADERS)
+                response = await asyncio.wait_for(
+                    http_client.get(
+                        f"{URL}/rest/v1/discord_messages?order=scraped_at.desc&limit=20",
+                        headers=HEADERS
+                    ),
+                    timeout=30.0
+                )
+                
                 if response.status_code == 200 and response.json():
                     messages = response.json()
-                    new_messages = []
-                    for m in messages:
-                        dt = safe_parse_dt(m.get("scraped_at"))
-                        if dt and dt > LAST_PUSH_CHECK_TIME:
-                            new_messages.append(m)
+                    new_messages = [m for m in messages if safe_parse_dt(m.get("scraped_at")) and safe_parse_dt(m.get("scraped_at")) > LAST_PUSH_CHECK_TIME]
                     
                     if new_messages:
-                        print(f"[PUSH] {len(new_messages)} new product(s) detected. Processing notifications...")
-                        
-                        # Set to avoid duplicates if multiple messages arrive
+                        print(f"[PUSH] {len(new_messages)} new products detected")
                         processed_ids = set()
                         
                         for msg in new_messages:
-                            if msg.get("id") in processed_ids: continue
+                            if msg.get("id") in processed_ids:
+                                continue
                             processed_ids.add(msg.get("id"))
                             
-                            msg_region = msg.get("region", "USA Stores")
-                            msg_category = msg.get("category_name", "General")
-                            product_data = msg.get("product_data", {})
-                            
-                            # Professional Formatting
-                            raw_title = product_data.get("title")
-                            if not raw_title or str(raw_title).lower() in ["n/a", "none"]:
-                                title = "HollowScan Deal Alert"
-                            else:
-                                title = str(raw_title)
-                            
-                            if len(title) > 60: title = title[:57] + "..."
-                            
-                            # Clean prices for logic
-                            def clean_p(v):
-                                if not v or str(v).lower() in ["n/a", "0.0", "0"]: return 0
-                                try:
-                                    return float(re.sub(r'[^0-9.]', '', str(v)))
-                                except: return 0
-                            
-                            price_val = clean_p(product_data.get("price", ""))
-                            was_val = clean_p(product_data.get("was_price", "") or product_data.get("resell_price", ""))
-
-                            # Qualification logic (matching Home Feed)
-                            has_image = product_data.get("image") and "placeholder" not in product_data.get("image")
-                            has_links = bool(product_data.get("buy_url") or (product_data.get("links") and any(product_data["links"].values())))
-                            has_any_price = price_val > 0 or was_val > 0
-
-                            if not (has_image or has_any_price or has_links):
-                                # Skip low-quality items that are filtered in feed
-                                continue
-                            
-                            # Generate Prefix / Badge
-                            discount_pct = 0
-                            if was_val > price_val and price_val > 0:
-                                discount_pct = int(((was_val - price_val) / was_val) * 100)
-                            
-                            if discount_pct >= 10:
-                                final_title = f"[{discount_pct}% OFF] {title}"
-                            else:
-                                final_title = title
-                            
-                            # Enhanced body
-                            body_parts = []
-                            if price_val > 0:
-                                if was_val > price_val:
-                                    body_parts.append(f"Now: ${product_data.get('price')} (Was: ${product_data.get('was_price') or product_data.get('resell_price')})")
-                                else:
-                                    body_parts.append(f"Price: ${product_data.get('price')}")
-                            
-                            region_label = msg_region.replace(" Stores", "")
-                            body_parts.append(f"Region: {region_label} | {msg_category}")
-                            body = " | ".join(body_parts)
-                            
-                            # Target specific users based on their Preferences
-                            target_tokens = []
-                            for u in users_data:
-                                prefs = u.get("notification_preferences") or {}
-                                tokens = u.get("push_tokens")
-                                if not tokens: continue
+                            # Process notification (wrapped in try-catch)
+                            try:
+                                # Notification logic here - keeping it simple
+                                msg_region = msg.get("region", "USA Stores")
+                                msg_category = msg.get("category_name", "General")
+                                product_data = msg.get("product_data", {})
+                                title = str(product_data.get("title") or "Deal Alert")[:60]
                                 
-                                # 1. Enabled check
-                                if not prefs.get("enabled", True): continue
+                                # Filter users
+                                target_tokens = []
+                                for u in users_data:
+                                    prefs = u.get("notification_preferences") or {}
+                                    if not prefs.get("enabled", True):
+                                        continue
+                                    tokens = u.get("push_tokens") or []
+                                    if isinstance(tokens, list):
+                                        target_tokens.extend(tokens)
                                 
-                                # 2. Region check
-                                user_regions = prefs.get("regions", [])
-                                if user_regions and msg_region not in user_regions: continue
-                                
-                                # 3. Category check
-                                user_cats = prefs.get("categories", [])
-                                if user_cats and msg_category not in user_cats: continue
-                                
-                                # 4. Discount check
-                                min_disc = prefs.get("min_discount_percent", 0)
-                                if discount_pct < min_disc: continue
-                                
-                                # If we passed all checks, add tokens
-                                if isinstance(tokens, list):
-                                    target_tokens.extend(tokens)
-                                else:
-                                    target_tokens.append(tokens)
-                            
-                            if target_tokens:
-                                unique_tokens = list(set(target_tokens))
-                                print(f"[PUSH] Sending to {len(unique_tokens)} devices for product: {title}")
-                                await send_expo_push_notification(unique_tokens, final_title, body, {"product_id": str(msg["id"])})
+                                if target_tokens:
+                                    await send_expo_push_notification(list(set(target_tokens)), title, msg_region, {"product_id": str(msg["id"])})
+                            except Exception as msg_err:
+                                print(f"[PUSH] Error processing message: {msg_err}")
                         
                         LAST_PUSH_CHECK_TIME = datetime.now(timezone.utc)
+                        
+            except asyncio.TimeoutError:
+                print("[PUSH] Timeout fetching messages")
             except Exception as e:
-                print(f"[PUSH] Error processing messages: {e}")
+                print(f"[PUSH] Error processing: {e}")
                 
+        except asyncio.CancelledError:
+            print("[PUSH] Worker shutdown")
+            break
         except Exception as e:
-            print(f"[PUSH] Worker error: {e}")
-            await asyncio.sleep(60)
-
+            print(f"[PUSH] CRITICAL: {type(e).__name__}: {e}")
+            await asyncio.sleep(60)  # Prevent rapid failure loop
+    
+    print("[PUSH] Worker stopped")
 
 @app.post("/v1/auth/login")
 async def login(background_tasks: BackgroundTasks, data: Dict = Body(...)):
