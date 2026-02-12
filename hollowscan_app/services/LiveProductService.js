@@ -88,7 +88,8 @@ class LiveProductService {
                 country,
                 category,
                 onlyNew = true,
-                search = ''
+                search = '',
+                forceRefresh = false
             } = params;
 
             // Build query to get only products created after lastProductTime
@@ -98,6 +99,10 @@ class LiveProductService {
 
             if (search && search.trim()) {
                 url += `&search=${encodeURIComponent(search.trim())}`;
+            }
+
+            if (forceRefresh) {
+                url += `&force_refresh=true`;
             }
 
             const response = await fetch(url, {
@@ -134,7 +139,7 @@ class LiveProductService {
      */
     async manualRefresh(params) {
         console.log('[LIVE] Manual refresh triggered');
-        await this.pollForNewProducts(params);
+        await this.pollForNewProducts({ ...params, forceRefresh: true });
     }
 
     /**

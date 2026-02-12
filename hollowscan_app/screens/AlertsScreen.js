@@ -11,7 +11,7 @@ const STORAGE_KEY_NOTIFICATIONS = '@hollowscan_notifications_enabled';
 const STORAGE_KEY_SUBS = '@hollowscan_subscriptions';
 
 const AlertsScreen = () => {
-    const { isDarkMode, selectedRegion, updateRegion, syncPreferences } = useContext(UserContext);
+    const { user, isDarkMode, selectedRegion, updateRegion, syncPreferences } = useContext(UserContext);
     const brand = Constants.BRAND;
 
     // Theme setup
@@ -40,6 +40,7 @@ const AlertsScreen = () => {
     const [loading, setLoading] = useState(true);
     const [notificationsEnabled, setNotificationsEnabled] = useState(false); // Master Toggle
     const [selectedSubs, setSelectedSubs] = useState({});
+    const [minDiscount, setMinDiscount] = useState(0);
 
     useEffect(() => {
         loadPreferences();
@@ -53,6 +54,12 @@ const AlertsScreen = () => {
 
             if (enabled !== null) setNotificationsEnabled(JSON.parse(enabled));
             if (subs !== null) setSelectedSubs(JSON.parse(subs));
+
+            // Load min discount from user context base if available
+            const contextPrefs = user?.notification_preferences || {};
+            if (contextPrefs.min_discount_percent !== undefined) {
+                setMinDiscount(contextPrefs.min_discount_percent);
+            }
 
             await fetchSubcategories(subs ? JSON.parse(subs) : null);
         } catch (e) {
@@ -123,7 +130,8 @@ const AlertsScreen = () => {
             await syncPreferences({
                 enabled: enabled,
                 regions: enabledRegions,
-                categories: enabledCategories
+                categories: enabledCategories,
+                min_discount_percent: minDiscount
             });
         } catch (error) {
             console.error('[ALERTS] Sync error:', error);
@@ -244,6 +252,41 @@ const AlertsScreen = () => {
                         value={notificationsEnabled}
                         style={{ transform: [{ scale: 1.1 }] }}
                     />
+                </View>
+
+                {/* DISCOUNT FILTER SECTION */}
+                <View style={[styles.filterCard, { backgroundColor: colors.card, borderColor: colors.border, opacity: notificationsEnabled ? 1 : 0.6 }]}>
+                    <Text style={[styles.filterTitle, { color: colors.text }]}>Minimum Discount Filter</Text>
+                    <Text style={[styles.filterDesc, { color: colors.textSecondary }]}>
+                        {minDiscount === 0 ? "🔔 Notify me for ALL relevant deals." : `🎯 Only notify me for deals with ${minDiscount}% OFF or more.`}
+                    </Text>
+
+                    <View style={styles.chipContainer}>
+                        {[0, 10, 25, 50, 75].map((val) => {
+                            const isSelected = minDiscount === val;
+                            return (
+                                <TouchableOpacity
+                                    key={val}
+                                    style={[
+                                        styles.chip,
+                                        { backgroundColor: isDarkMode ? 'rgba(255,255,255,0.05)' : '#F3F4F6' },
+                                        isSelected && { backgroundColor: brand.BLUE, borderColor: brand.BLUE }
+                                    ]}
+                                    onPress={() => {
+                                        if (!notificationsEnabled) return;
+                                        setMinDiscount(val);
+                                        // Trigger sync after a short delay or directly
+                                        setTimeout(() => syncWithCloud(notificationsEnabled, selectedSubs), 100);
+                                    }}
+                                    disabled={!notificationsEnabled}
+                                >
+                                    <Text style={[styles.chipText, { color: isSelected ? '#FFF' : colors.textSecondary }]}>
+                                        {val === 0 ? 'All' : `${val}%+`}
+                                    </Text>
+                                </TouchableOpacity>
+                            );
+                        })}
+                    </View>
                 </View>
 
                 {/* INFO BANNER */}
@@ -388,7 +431,15 @@ const styles = StyleSheet.create({
     },
     storeIconBox: { width: 44, height: 44, borderRadius: 12, justifyContent: 'center', alignItems: 'center' },
     storeName: { fontSize: 16, fontWeight: '700', marginBottom: 2 },
-    storeStatus: { fontSize: 12, fontWeight: '600' }
+    storeStatus: { fontSize: 12, fontWeight: '600' },
+
+    // Filter UI
+    filterCard: { padding: 20, borderRadius: 24, borderWidth: 1, marginBottom: 16 },
+    filterTitle: { fontSize: 16, fontWeight: '700', marginBottom: 4 },
+    filterDesc: { fontSize: 13, marginBottom: 16 },
+    chipContainer: { flexDirection: 'row', gap: 8, flexWrap: 'wrap' },
+    chip: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: 14, borderWidth: 1, borderColor: 'transparent', minWidth: 65, alignItems: 'center' },
+    chipText: { fontSize: 13, fontWeight: '700' }
 });
 
 export default AlertsScreen;

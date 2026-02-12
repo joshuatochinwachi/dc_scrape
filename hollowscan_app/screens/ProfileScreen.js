@@ -401,7 +401,7 @@ const ProfileScreen = () => {
                     <SettingRow
                         icon="🔒"
                         label="Privacy Policy"
-                        onPress={() => openInfoModal('Privacy Policy', privacyContent)}
+                        onPress={() => Linking.openURL('https://www.hollowscan.com/privacy-policy')}
                     />
                 </View>
 

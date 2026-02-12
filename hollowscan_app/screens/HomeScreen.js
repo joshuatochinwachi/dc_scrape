@@ -15,7 +15,8 @@ import {
     Linking,
     Animated,
     Keyboard,
-    Alert
+    Alert,
+    Platform
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -193,6 +194,53 @@ const HomeScreen = () => {
                 return combined;
             });
             newProducts.forEach(product => {
+                // Apply User Preferences to Foreground Notifications
+                const prefs = user?.notification_preferences || {
+                    enabled: true,
+                    regions: ["USA Stores", "UK Stores", "Canada Stores"],
+                    categories: [],
+                    min_discount_percent: 0
+                };
+
+                if (!prefs.enabled) return;
+
+                const region = product.region || 'USA Stores';
+                const store = product.category_name || 'HollowScan';
+
+                // 1. Region Check
+                if (prefs.regions && prefs.regions.length > 0 && !prefs.regions.includes(region)) return;
+
+                // 2. Category (Store) Check
+                const userCats = prefs.categories || [];
+                const isAllSelected = userCats.includes('ALL') || userCats.length === 0;
+                if (!isAllSelected && !userCats.includes(store)) return;
+
+                // 3. Quality Qualification (Matches Backend/Feed)
+                const pData = product.product_data || {};
+                const hasImage = pData.image && !pData.image.includes('placeholder');
+                const hasLinks = !!(pData.buy_url || (pData.links && Object.values(pData.links).some(l => l)));
+
+                const p = parseFloat(String(pData.price || '0').replace(/[^0-9.]/g, ''));
+                const w = parseFloat(String(pData.was_price || '0').replace(/[^0-9.]/g, ''));
+                const r = parseFloat(String(pData.resell || '0').replace(/[^0-9.]/g, ''));
+                const hasAnyPrice = p > 0 || w > 0 || r > 0;
+
+                if (!(hasImage || hasAnyPrice || hasLinks)) {
+                    console.log('[HOME] Skipping low-quality foreground notification:', product.id);
+                    return;
+                }
+
+                // 4. Discount Check
+                const minDiscount = prefs.min_discount_percent || 0;
+                let currentDiscount = 0;
+                if (r > p && p > 0) {
+                    currentDiscount = 100; // Profit deals bypass discount check
+                } else if (w > p && p > 0) {
+                    currentDiscount = Math.floor(((w - p) / w) * 100);
+                }
+
+                if (currentDiscount < minDiscount) return;
+
                 sendDealNotification(product);
             });
         });
@@ -203,7 +251,7 @@ const HomeScreen = () => {
         };
     }, [viewRegion, selectedCategories, searchQuery]);
 
-    const fetchInitialData = async () => {
+    const fetchInitialData = async (forceRefresh = false) => {
         setIsLoading(true);
         setOffset(0);
         setHasMore(true);
@@ -211,7 +259,7 @@ const HomeScreen = () => {
         await Promise.all([
             fetchCategories(),
             fetchUserStatus(),
-            fetchAlerts(0, true),
+            fetchAlerts(0, true, null, forceRefresh),
             // Background sync context to catch expiry even if Profile isn't opened
             checkTelegramStatus(),
             refreshUserStatus()
@@ -239,7 +287,7 @@ const HomeScreen = () => {
         } catch (e) { }
     };
 
-    const fetchAlerts = async (currentOffset, reset = false, overrideSearch = null) => {
+    const fetchAlerts = async (currentOffset, reset = false, overrideSearch = null, forceRefresh = false) => {
         try {
             const activeSearch = overrideSearch !== null ? overrideSearch : searchQuery;
             const catParam = selectedCategories.includes('ALL') ? 'ALL' : selectedCategories[0] || 'ALL';
@@ -247,6 +295,10 @@ const HomeScreen = () => {
 
             if (activeSearch && activeSearch.trim()) {
                 url += `&search=${encodeURIComponent(activeSearch.trim())}`;
+            }
+
+            if (forceRefresh) {
+                url += `&force_refresh=true`;
             }
 
             const response = await fetch(url);
@@ -298,7 +350,7 @@ const HomeScreen = () => {
 
     const onRefresh = async () => {
         setIsRefreshing(true);
-        await fetchInitialData();
+        await fetchInitialData(true);
         setIsRefreshing(false);
     };
 
@@ -651,6 +703,11 @@ const HomeScreen = () => {
                     refreshing={isRefreshing}
                     onEndReached={handleLoadMore}
                     onEndReachedThreshold={0.5}
+                    maintainVisibleContentPosition={{
+                        minIndexForVisible: 0,
+                        autoscrollToTopThreshold: 10,
+                    }}
+                    removeClippedSubviews={Platform.OS === 'android'}
                     ListFooterComponent={() => {
                         if (isLoadingMore) return <ActivityIndicator color={brand.BLUE} style={{ marginVertical: 20 }} />;
                         if (!userIsPremium && alerts.length >= 4) {

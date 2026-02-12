@@ -109,38 +109,74 @@ export const sendLocalNotification = async (title, body, data = {}) => {
 
 export const sendDealNotification = async (product) => {
     try {
-        const { product_data, category_name, region } = product;
-        const title = product_data?.title || 'New Deal Detected!';
+        if (!product) return;
 
-        // 1. Calculate Discount for Title
+        const product_data = product.product_data || {};
+        const region = product.region || 'USA Stores';
+        const title = product_data.title || 'Deal Alert';
+        const category_name = product.category_name || 'HollowScan';
+
+        // 1. Determine Currency & Region
+        const regionRaw = region || '';
+        const regionLabel = regionRaw.replace(' Stores', '').trim();
+        const currency = regionRaw.toUpperCase().includes('UK') ? '£' : '$';
+
+        // 2. Calculate Discount or Profit for Title
         let discountInfo = '🎉 ';
         const price = product_data?.price;
-        const wasPrice = product_data?.was_price || product_data?.resell;
+        const wasPrice = product_data?.was_price;
+        const resell = product_data?.resell;
 
-        if (price && wasPrice) {
-            const p = parseFloat(String(price).replace(/[^0-9.]/g, ''));
-            const w = parseFloat(String(wasPrice).replace(/[^0-9.]/g, ''));
-            if (w > p && p > 0) {
-                const disc = Math.round(((w - p) / w) * 100);
-                if (disc >= 10) discountInfo = `📉 ${disc}% OFF: `;
+        try {
+            const p = parseFloat(String(price || '0').replace(/[^0-9.]/g, ''));
+
+            // Case A: Profit (Resell > Price) - Highlight this first as it's higher value
+            const r = parseFloat(String(resell || '0').replace(/[^0-9.]/g, ''));
+            if (r > p && p > 0) {
+                const profit = r - p;
+                discountInfo = `💰 ${currency}${profit.toFixed(2)} Profit: `;
             }
+            // Case B: Discount (Now < Was)
+            else if (wasPrice) {
+                const w = parseFloat(String(wasPrice || '0').replace(/[^0-9.]/g, ''));
+                if (w > p && p > 0) {
+                    const disc = Math.floor(((w - p) / w) * 100);
+                    if (disc >= 5) discountInfo = `📉 ${disc}% OFF: `;
+                }
+            }
+        } catch (e) {
+            console.log('[NOTIFICATIONS] Parsing error:', e);
         }
 
         const finalTitle = `${discountInfo}${title.substring(0, 45)}${title.length > 45 ? '...' : ''}`;
 
-        // 2. Build Body (Omit N/A and refine labels)
+        // 3. Build Body (Professional Format)
         const parts = [];
-        if (price && price !== '0.0' && price !== 'N/A' && price !== '0') {
-            parts.push(`Price: $${price}`);
-        }
-        if (wasPrice && wasPrice !== '0.0' && wasPrice !== 'N/A' && wasPrice !== '0' && wasPrice !== price) {
-            parts.push(`Market: $${wasPrice}`);
+
+        try {
+            const pStr = String(price || '').replace(/[^0-9.]/g, '');
+            const pVal = parseFloat(pStr);
+            const wStr = String(wasPrice || '').replace(/[^0-9.]/g, '');
+            const wVal = parseFloat(wStr);
+            const rStr = String(resell || '').replace(/[^0-9.]/g, '');
+            const rVal = parseFloat(rStr);
+
+            if (pVal > 0) {
+                let priceStr = `Now: ${currency}${pStr}`;
+                if (wVal > pVal) {
+                    priceStr += ` (Was ${currency}${wStr})`;
+                }
+                parts.push(priceStr);
+            } else if (rVal > 0) {
+                parts.push(`Resell: ${currency}${rStr}`);
+            }
+        } catch (e) {
+            console.log('[NOTIFICATIONS] Body formatting error:', e);
         }
 
-        // Region/Store
         const storeLabel = category_name || 'HollowScan';
-        const regionLabel = region ? region.replace(' Stores', '') : '';
-        parts.push(`${regionLabel} ${storeLabel}`.trim());
+        parts.push(`Store: ${storeLabel}`);
+        if (regionLabel) parts.push(`Reg: ${regionLabel}`);
 
         const finalBody = parts.join(' | ');
 
@@ -148,6 +184,7 @@ export const sendDealNotification = async (product) => {
             product_id: product?.id || 'unknown',
             category: category_name,
             region: region,
+            image: product_data?.image
         });
     } catch (error) {
         console.log('[NOTIFICATIONS] Error sending deal notification:', error);

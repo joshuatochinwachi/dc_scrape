@@ -246,7 +246,9 @@ export const UserProvider = ({ children }) => {
                 isPremium: data.is_premium !== undefined ? data.is_premium : data.isPremium,
                 email_verified: data.email_verified !== undefined ? data.email_verified : data.is_verified,
                 subscription_status: data.status !== undefined ? data.status : data.subscription_status,
-                subscription_end: data.subscription_end !== undefined ? data.subscription_end : data.subscriptionEnd
+                subscription_end: data.subscription_end !== undefined ? data.subscription_end : data.subscriptionEnd,
+                notification_preferences: data.notification_preferences || userRef.current?.notification_preferences,
+                region: data.region || userRef.current?.region
             };
 
             setUser(updatedUser);
