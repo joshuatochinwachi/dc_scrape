@@ -26,9 +26,6 @@ from supabase_utils import get_supabase_config, sanitize_text
 from functools import lru_cache
 from contextlib import asynccontextmanager
 
-from cache_utils import feed_cache, user_cache, categories_cache
-
-
 # --- HELPER: Robust Timestamp Parsing ---
 def safe_parse_dt(dt_str: str) -> Optional[datetime]:
     if not dt_str: return None
@@ -717,27 +714,20 @@ async def get_bot_users_data():
 
 @app.get("/v1/user/status")
 async def get_user_status(background_tasks: BackgroundTasks, user_id: str = Query(...)):
-    """Get user's current subscription and verification status (cached)"""
-    
-    # Check cache first
-    cache_key = f"user_status:{user_id}"
-    cached_status = user_cache.get(cache_key)
-    if cached_status is not None:
-        print(f"[USER CACHE] ✓ Hit for {user_id[:8]}...")
-        return cached_status
-    
-    print(f"[USER CACHE] ✗ Miss - Fetching from DB for {user_id[:8]}...")
-    
+    """Get user's current subscription and verification status"""
     try:
         user_data = await get_user_by_id(user_id)
         if not user_data:
             return {"success": False, "message": "User not found"}
 
+        # 1. Use strict verification for existing status
         is_premium = await verify_premium_status(user_id, user_data, background_tasks)
         subscription_end = user_data.get("subscription_end")
         
+        # 2. PROACTIVE: Also check Telegram linking status if not already premium
         if not is_premium:
             try:
+                # Check if user has a linked telegram account
                 links_resp = await http_client.get(
                     f"{URL}/rest/v1/user_telegram_links?user_id=eq.{user_id}&select=telegram_id",
                     headers=HEADERS
@@ -751,29 +741,28 @@ async def get_user_status(background_tasks: BackgroundTasks, user_id: str = Quer
                         if expiry_str:
                             try:
                                 exp_dt = datetime.fromisoformat(expiry_str.replace('Z', '+00:00'))
-                                if exp_dt.tzinfo is None: 
-                                    exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+                                if exp_dt.tzinfo is None: exp_dt = exp_dt.replace(tzinfo=timezone.utc)
                                 if exp_dt > datetime.now(timezone.utc):
                                     is_premium = True
                                     subscription_end = expiry_str
+                                    # Sync back to DB so subsequent checks are faster
                                     background_tasks.add_task(update_user, user_id, {
                                         "subscription_status": "active",
                                         "subscription_end": expiry_str,
                                         "subscription_source": "telegram"
                                     })
-                            except: 
-                                pass
+                            except: pass
             except Exception as e:
                 print(f"[STATUS] TG check failed: {e}")
 
-        result = {
+        return {
             "success": True,
             "is_premium": is_premium,
             "subscription_end": subscription_end,
             "status": "active" if is_premium else "free",
-            "subscription_status": "active" if is_premium else "free",
+            "subscription_status": "active" if is_premium else "free", # Keeping both for safety
             "email_verified": user_data.get("email_verified", False),
-            "is_verified": user_data.get("email_verified", False),
+            "is_verified": user_data.get("email_verified", False), # Keeping both for safety
             "email": user_data.get("email"),
             "name": user_data.get("name"),
             "bio": user_data.get("bio"),
@@ -781,11 +770,6 @@ async def get_user_status(background_tasks: BackgroundTasks, user_id: str = Quer
             "avatar_url": user_data.get("avatar_url"),
             "region": user_data.get("region", "USA Stores")
         }
-        
-        # CACHE THE RESULT
-        user_cache.set(cache_key, result)
-        return result
-        
     except Exception as e:
         print(f"[STATUS] Error: {e}")
         return {"success": False, "message": str(e)}
@@ -814,8 +798,6 @@ async def update_user_profile(profile: UserProfileUpdate):
             
         success, msg = await update_user(profile.user_id, data, return_details=True)
         if success:
-            # INVALIDATE CACHE
-            user_cache.invalidate(f"user_status:{profile.user_id}")
             return {"success": True, "message": "Profile updated successfully"}
         else:
             return {"success": False, "message": f"Failed: {msg}"}
@@ -951,9 +933,6 @@ async def link_telegram_endpoint(data: Dict = Body(...)):
                 })
                 print(f"[LINK] Synced premium status for user {user_id} from Telegram {telegram_id}")
 
-            # INVALIDATE CACHE
-            user_cache.invalidate(f"user_status:{user_id}")
-
             # 4. Consume Token (Delete it)
             await http_client.delete(f"{URL}/rest/v1/telegram_link_tokens?token=eq.{token}", headers=HEADERS)
             return {"success": True, "message": "Account linked successfully" + (" and premium status synced!" if is_premium_telegram else "")}
@@ -1019,9 +998,6 @@ async def unlink_telegram_endpoint(data: Dict = Body(...)):
                  "subscription_source": None
              })
              print(f"[LINK] Reset premium status for user {user_id} after unlinking Telegram")
-
-        # INVALIDATE CACHE
-        user_cache.invalidate(f"user_status:{user_id}")
 
         if response.status_code in [200, 204]:
              return {"success": True, "message": "Unlinked successfully and premium status reset."}
@@ -1163,28 +1139,11 @@ async def background_notification_worker():
 async def login(background_tasks: BackgroundTasks, data: Dict = Body(...)):
     email = data.get("email")
     password = data.get("password")
-    if not email or not password:
-        print(f"[AUTH] Missing email or password in request data: {data.keys()}")
-        raise HTTPException(status_code=400, detail="Email and password are required")
-    
+    if not email or not password: raise HTTPException(status_code=400, detail="Email and password are required")
     user = await get_user_by_email(email)
-    if not user:
-        print(f"[AUTH] User not found for email: {email}")
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-        
+    if not user: raise HTTPException(status_code=401, detail="Invalid email or password")
     stored_hash = user.get("password_hash")
-    provided_hash = hash_password(password)
-    
-    if not stored_hash:
-        print(f"[AUTH] User {email} has no password_hash in DB")
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-        
-    if stored_hash != provided_hash:
-        print(f"[AUTH] Password mismatch for {email}")
-        # print(f"DEBUG: stored={stored_hash}, provided={provided_hash}")
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-    
-    print(f"[AUTH] Login successful for {email}")
+    if not stored_hash or stored_hash != hash_password(password): raise HTTPException(status_code=401, detail="Invalid email or password")
     
     is_verified = user.get("email_verified", False)
     is_premium = user.get("subscription_status") == "active"
@@ -1443,15 +1402,6 @@ async def root():
 
 @app.get("/v1/categories")
 async def get_categories():
-    # Check cache first
-    cache_key = "categories"
-    cached_result = categories_cache.get(cache_key)
-    if cached_result is not None:
-        print("[CATEGORIES CACHE] ✓ Hit")
-        return cached_result
-    
-    print("[CATEGORIES CACHE] ✗ Miss - Fetching from storage")
-    
     result = {}
     channels = []
     source = "none"
@@ -1487,16 +1437,7 @@ async def get_categories():
     for region in result:
         result[region] = sorted(result[region])
         result[region].insert(0, "ALL")
-        
-    result_data = {
-        "categories": result, 
-        "source": source, 
-        "channel_count": len(channels)
-    }
-    
-    # Cache it
-    categories_cache.set(cache_key, result_data)
-    return result_data
+    return {"categories": result, "source": source, "channel_count": len(channels)}
 
 async def get_channels_data():
     """Helper to fetch channels from storage or local fallback"""
@@ -1518,30 +1459,7 @@ async def get_channels_data():
     return channels or DEFAULT_CHANNELS
 
 @app.get("/v1/feed")
-async def get_feed(
-    user_id: str, 
-    background_tasks: BackgroundTasks, 
-    region: Optional[str] = "ALL", 
-    category: Optional[str] = "ALL", 
-    offset: int = 0, 
-    limit: int = 20, 
-    country: Optional[str] = None, 
-    search: Optional[str] = None,
-    force_refresh: bool = False  # NEW: Allow manual cache bypass
-):
-    # Generate cache key
-    cache_key = feed_cache.get_cache_key(user_id, region, category, search or "", offset)
-    
-    # Check cache first (unless force_refresh requested)
-    if not force_refresh:
-        cached_result = feed_cache.get(cache_key)
-        if cached_result is not None:
-            print(f"[FEED CACHE] ✓ Hit for user {user_id[:8]}... ({region}/{category})")
-            return cached_result
-    
-    print(f"[FEED CACHE] ✗ Miss - Fetching from DB for user {user_id[:8]}...")
-    
-    # ======= EXISTING LOGIC STARTS HERE - KEEP AS IS =======
+async def get_feed(user_id: str, background_tasks: BackgroundTasks, region: Optional[str] = "ALL", category: Optional[str] = "ALL", offset: int = 0, limit: int = 20, country: Optional[str] = None, search: Optional[str] = None):
     if country and (not region or region == "ALL"): region = country
     channels = await get_channels_data()
     
@@ -1566,26 +1484,27 @@ async def get_feed(
             elif is_region_match: target_ids.append(c['id'])
     id_filter = ""
     if target_ids: id_filter = f"&channel_id=in.({','.join(target_ids)})"
-    
     premium_user = False
     try:
         premium_user = await verify_premium_status(user_id, background_tasks=background_tasks)
     except Exception as e: print(f"[FEED] Quota check error: {e}")
-    
     all_products = []
     seen_signatures = set()
     current_sql_offset = offset
     chunks_scanned = 0
+    # Increase scan depth for searches (Premium gets 1,000,000 message potential lookback)
+    # Each request scans a chunk; has_more lets them keep "digging"
     base_max = 50 if premium_user else 30
     search_multiplier = 20 if search else 1
     max_chunks = base_max * search_multiplier
-    batch_limit = 1000 if search else 50
+    batch_limit = 1000 if search else 50 # Much larger batches during search for speed
     
     db_end_reached = False
     while len(all_products) < limit and chunks_scanned < max_chunks:
         search_is_active = bool(search and search.strip())
         query = f"order=scraped_at.desc&offset={current_sql_offset}&limit={batch_limit}"
         
+        # Region/Category Filter ONLY if NOT searching (to make search truly GLOBAL)
         if id_filter and not search_is_active:
              query += id_filter
              
@@ -1594,11 +1513,13 @@ async def get_feed(
             if keywords:
                 or_parts = []
                 for k in keywords:
+                    # Optimized SQL Filter (Titles, Descriptions, Content, and Core Fields)
                     or_parts.append(f"content.ilike.*{k}*")
                     or_parts.append(f"raw_data->embeds->0->>title.ilike.*{k}*")
                     or_parts.append(f"raw_data->embeds->0->>description.ilike.*{k}*")
                     or_parts.append(f"raw_data->embed->>title.ilike.*{k}*")
                     or_parts.append(f"raw_data->embed->>description.ilike.*{k}*")
+                    # Added back critical field checks for monitors that use them
                     or_parts.append(f"raw_data->embeds->0->fields->0->>value.ilike.*{k}*")
                     or_parts.append(f"raw_data->embeds->0->fields->1->>value.ilike.*{k}*")
                     or_parts.append(f"raw_data->embeds->0->author->>name.ilike.*{k}*")
@@ -1620,6 +1541,7 @@ async def get_feed(
                 prod = extract_product(msg, channel_map)
                 if not prod: continue
                 
+                # Product refinement
                 p_data = prod.get("product_data", {})
                 price_val = p_data.get("price")
                 resale_val = p_data.get("resell")
@@ -1634,8 +1556,10 @@ async def get_feed(
                     has_any_price = p_num > 0 or r_num > 0 or w_num > 0
                 except (ValueError, TypeError): has_any_price = bool(price_val or resale_val or was_val)
                 
+                # Product qualification: MUST have an image OR a price OR a buy link (matching Home Feed)
                 if not (has_image or has_any_price or has_links): continue
                 
+                # Final Keyword Filter (OR logic on text blob)
                 if search_is_active:
                     search_keywords = [k.lower().strip() for k in search.split() if k.strip()]
                     search_blob = f"{prod['product_data'].get('title','')}\n{prod['product_data'].get('description','')}\n{prod.get('category_name','')}"
@@ -1650,6 +1574,7 @@ async def get_feed(
                             break
                     if not match_found: continue
 
+                # Normal View Filtering (NOT for search)
                 if not search_is_active:
                     if region and region.strip().upper() != "ALL":
                         if prod["region"].strip() != region.strip(): continue
@@ -1662,6 +1587,7 @@ async def get_feed(
             
             current_sql_offset += len(messages)
             chunks_scanned += 1
+            # If we didn't find enough products but haven't hit the end, keep scanning
             if len(messages) < batch_limit: 
                 db_end_reached = True
                 break
@@ -1669,33 +1595,32 @@ async def get_feed(
             print(f"[FEED] Error in batch fetch: {e}")
             break
 
+    # Search Paging Logic:
     has_more = not db_end_reached
     
     if not premium_user:
+        # Limit free users to 4 products total
         if len(all_products) > 4:
             all_products = all_products[:4]
             has_more = False
         for product in all_products: product["is_locked"] = False
-    
-    # ======= EXISTING LOGIC ENDS HERE =======
-    
-    # Build result
-    result = {
-        "products": all_products, 
-        "next_offset": current_sql_offset, 
-        "has_more": has_more, 
-        "is_premium": premium_user, 
-        "total_count": 100
-    }
-    
-    # CACHE THE RESULT
-    feed_cache.set(cache_key, result)
-    
-    print(f"[FEED] Complete. Found {len(all_products)} products scanning {current_sql_offset - offset} messages. (Cached)")
-    return result
+        
+    print(f"[FEED] Search/Feed complete. Found {len(all_products)} products scanning {current_sql_offset - offset} messages.")
+    return {"products": all_products, "next_offset": current_sql_offset, "has_more": has_more, "is_premium": premium_user, "total_count": 100}
 
-# NOTE: Primary /v1/user/status endpoint is defined at line ~715 with full functionality
-# Duplicate endpoint removed to fix FastAPI duplicate operation ID warning
+@app.get("/v1/user/status")
+async def get_user_status(user_id: str):
+    user = await get_user_by_id(user_id)
+    if not user: raise HTTPException(status_code=404, detail="User not found")
+    return {
+        "status": user.get("subscription_status"), 
+        "views_used": user.get("daily_free_alerts_viewed", 0), 
+        "views_limit": 4, 
+        "is_premium": user.get("subscription_status") == "active",
+        "email_verified": user.get("email_verified", False)
+    }
+
+
 
 @app.get("/v1/deals/saved")
 async def get_saved_deals(user_id: str = Query(...)):
@@ -2024,64 +1949,12 @@ async def update_notification_preferences(user_id: str, preferences: Dict[str, A
         if response.status_code not in [200, 204]:
             raise HTTPException(status_code=500, detail="Failed to update preferences")
         
-        # INVALIDATE CACHE
-        user_cache.invalidate(f"user_status:{user_id}")
-        
         print(f"[PUSH] Updated preferences for user {user_id}: {valid_preferences}")
         return {"success": True, "message": "Preferences updated", "preferences": valid_preferences}
     
     except Exception as e:
         print(f"[PUSH] Error updating preferences: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/v1/cache/invalidate")
-async def invalidate_cache(
-    user_id: Optional[str] = None,
-    cache_type: str = "all"  # "all", "feed", "user", "categories"
-):
-    """
-    Admin endpoint to manually invalidate cache
-    Use this when you know data has changed and want immediate refresh
-    """
-    try:
-        if cache_type == "all" or cache_type == "feed":
-            if user_id:
-                feed_cache.invalidate(f"feed:{user_id}")
-                print(f"[CACHE] Invalidated feed cache for user {user_id}")
-            else:
-                feed_cache.invalidate()
-                print("[CACHE] Invalidated all feed caches")
-        
-        if cache_type == "all" or cache_type == "user":
-            if user_id:
-                user_cache.invalidate(f"user_status:{user_id}")
-                print(f"[CACHE] Invalidated user cache for {user_id}")
-            else:
-                user_cache.invalidate()
-                print("[CACHE] Invalidated all user caches")
-        
-        if cache_type == "all" or cache_type == "categories":
-            categories_cache.invalidate()
-            print("[CACHE] Invalidated categories cache")
-        
-        return {
-            "success": True, 
-            "message": f"Cache invalidated for {cache_type}",
-            "user_id": user_id
-        }
-    except Exception as e:
-        return {"success": False, "message": str(e)}
-
-
-@app.get("/v1/cache/stats")
-async def get_cache_stats():
-    """Get cache statistics for monitoring"""
-    return {
-        "feed_cache": feed_cache.get_stats(),
-        "user_cache": user_cache.get_stats(),
-        "categories_cache": categories_cache.get_stats()
-    }
 
 
 @app.get("/health")
