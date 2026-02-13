@@ -49,19 +49,33 @@ const AlertsScreen = () => {
     const loadPreferences = async () => {
         try {
             // Load Settings
-            const enabled = await AsyncStorage.getItem(STORAGE_KEY_NOTIFICATIONS);
-            const subs = await AsyncStorage.getItem(STORAGE_KEY_SUBS);
+            let localEnabled = await AsyncStorage.getItem(STORAGE_KEY_NOTIFICATIONS);
+            let localSubs = await AsyncStorage.getItem(STORAGE_KEY_SUBS);
 
-            if (enabled !== null) setNotificationsEnabled(JSON.parse(enabled));
-            if (subs !== null) setSelectedSubs(JSON.parse(subs));
-
-            // Load min discount from user context base if available
             const contextPrefs = user?.notification_preferences || {};
+
+            // If locally cleared (e.g. after logout) but cloud has prefs, hydrate from cloud
+            if (localEnabled === null && contextPrefs.enabled !== undefined) {
+                localEnabled = JSON.stringify(contextPrefs.enabled);
+                await AsyncStorage.setItem(STORAGE_KEY_NOTIFICATIONS, localEnabled);
+            }
+
+            if (localSubs === null && contextPrefs.categories) {
+                const subs = {};
+                contextPrefs.categories.forEach(cat => { if (cat !== 'ALL') subs[cat] = true; });
+                localSubs = JSON.stringify(subs);
+                await AsyncStorage.setItem(STORAGE_KEY_SUBS, localSubs);
+            }
+
+            if (localEnabled !== null) setNotificationsEnabled(JSON.parse(localEnabled));
+            if (localSubs !== null) setSelectedSubs(JSON.parse(localSubs));
+
+            // Load min discount
             if (contextPrefs.min_discount_percent !== undefined) {
                 setMinDiscount(contextPrefs.min_discount_percent);
             }
 
-            await fetchSubcategories(subs ? JSON.parse(subs) : null);
+            await fetchSubcategories(localSubs ? JSON.parse(localSubs) : null);
         } catch (e) {
             console.error('Failed to load preferences', e);
         }

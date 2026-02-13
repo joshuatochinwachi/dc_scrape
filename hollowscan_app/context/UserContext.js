@@ -243,13 +243,32 @@ export const UserProvider = ({ children }) => {
                 bio: data.bio || userRef.current.bio,
                 location: data.location || userRef.current.location,
                 avatar_url: data.avatar_url || userRef.current.avatar_url,
-                isPremium: data.is_premium !== undefined ? data.is_premium : data.isPremium,
-                email_verified: data.email_verified !== undefined ? data.email_verified : data.is_verified,
-                subscription_status: data.status !== undefined ? data.status : data.subscription_status,
-                subscription_end: data.subscription_end !== undefined ? data.subscription_end : data.subscriptionEnd,
+                isPremium: data.is_premium !== undefined ? data.is_premium : (data.isPremium !== undefined ? data.isPremium : userRef.current?.isPremium),
+                email_verified: data.email_verified !== undefined ? data.email_verified : (data.is_verified !== undefined ? data.is_verified : userRef.current?.email_verified),
+                subscription_status: data.status !== undefined ? data.status : (data.subscription_status !== undefined ? data.subscription_status : userRef.current?.subscription_status),
+                subscription_end: data.subscription_end !== undefined ? data.subscription_end : (data.subscriptionEnd !== undefined ? data.subscriptionEnd : userRef.current?.subscription_end),
                 notification_preferences: data.notification_preferences || userRef.current?.notification_preferences,
                 region: data.region || userRef.current?.region
             };
+
+            // SYNC ALERTS STORAGE: If we have notification preferences from the cloud,
+            // ensure the local Alert-specific keys are updated so screens stay in sync.
+            if (data.notification_preferences) {
+                try {
+                    const prefs = data.notification_preferences;
+                    if (prefs.enabled !== undefined) {
+                        await AsyncStorage.setItem('@hollowscan_notifications_enabled', JSON.stringify(prefs.enabled));
+                    }
+                    if (prefs.categories) {
+                        const subs = {};
+                        prefs.categories.forEach(cat => { if (cat !== 'ALL') subs[cat] = true; });
+                        await AsyncStorage.setItem('@hollowscan_subscriptions', JSON.stringify(subs));
+                    }
+                    console.log('[USER] Sync\'d cloud alerts to local storage');
+                } catch (syncError) {
+                    console.error('[USER] Alert storage sync error:', syncError);
+                }
+            }
 
             setUser(updatedUser);
             await AsyncStorage.setItem('user_data', JSON.stringify(updatedUser));
@@ -301,6 +320,9 @@ export const UserProvider = ({ children }) => {
 
             // Clear storage
             await AsyncStorage.removeItem('user_data');
+            await AsyncStorage.removeItem('@hollowscan_notifications_enabled');
+            await AsyncStorage.removeItem('@hollowscan_subscriptions');
+
             console.log('[AUTH] Logout complete');
         } catch (error) {
             console.error('[AUTH] Logout error:', error);

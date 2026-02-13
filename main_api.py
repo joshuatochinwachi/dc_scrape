@@ -58,10 +58,23 @@ http_client: Optional[httpx.AsyncClient] = None
 async def lifespan(app: FastAPI):
     """Manage app lifespan with persistent HTTP client"""
     global http_client
-    limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
-    timeout = httpx.Timeout(20.0, connect=5.0)
-    http_client = httpx.AsyncClient(limits=limits, timeout=timeout, http2=True)
-    print("[STARTUP] HTTP client initialized with connection pooling")
+    limits = httpx.Limits(max_keepalive_connections=50, max_connections=200)
+    # INCREASED TIMEOUTS FOR SLOW NETWORKS
+    timeout = httpx.Timeout(60.0, connect=30.0, read=60.0, write=60.0, pool=30.0)
+    http_client = httpx.AsyncClient(limits=limits, timeout=timeout, http2=False)
+    print("[STARTUP] HTTP client initialized (HTTP/2 Disabled for compatibility)")
+    
+    # Verify DB connectivity (With extra patient 90s timeout for startup)
+    try:
+        # Ping users table for a more reliable check than the root endpoint
+        resp = await http_client.get(f"{URL}/rest/v1/users?limit=1", headers=HEADERS, timeout=90.0)
+        if resp.status_code == 200:
+            print("[STARTUP] Supabase connection: ✅ OK (Patience wins!)")
+        else:
+            print(f"[STARTUP] Supabase connection: ⚠️ FAILED (HTTP {resp.status_code})")
+            print(f"          Response: {resp.text[:200]}")
+    except Exception as e:
+        print(f"[STARTUP] Supabase connection: ❌ ERROR ({repr(e)})")
     
     # Start background worker
     asyncio.create_task(background_notification_worker())
@@ -128,18 +141,52 @@ def optimize_image_url(url: str) -> str:
     except: pass
     return url
 
+def db_retry(retries: int = 5, backoff: float = 1.0):
+    """Decorator to retry DB operations on timeout or transient errors"""
+    def decorator(func):
+        async def wrapper(*args, **kwargs):
+            for i in range(retries):
+                try:
+                    result = await func(*args, **kwargs)
+                    # Handle logical failures that should be retried (e.g. 500 statement timeouts)
+                    # If the function returns (False, msg) or similar, we can check it
+                    if isinstance(result, tuple) and len(result) == 2:
+                        success, detail = result
+                        if not success and ("57014" in str(detail) or "timeout" in str(detail).lower()):
+                            raise httpx.ReadTimeout(f"Logical Timeout: {detail}")
+                    return result
+                except (httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+                    wait = backoff * (2 ** i)
+                    print(f"[RETRY] {func.__name__} failed ({type(e).__name__}). attempt {i+1}/{retries} in {wait}s...")
+                    await asyncio.sleep(wait)
+                except Exception as e:
+                    print(f"[DB] Fatal error in {func.__name__}: {repr(e)}")
+                    raise e
+            print(f"[RETRY] {func.__name__} exhausted all {retries} retries.")
+            return None
+        return wrapper
+    return decorator
+
+@db_retry(retries=3, backoff=1.5)
 async def get_user_by_id(user_id: str) -> Optional[Dict]:
-    try:
-        response = await http_client.get(f"{URL}/rest/v1/users?id=eq.{user_id}&select=*", headers=HEADERS)
-        if response.status_code == 200 and response.json(): return response.json()[0]
-    except Exception as e: print(f"[DB] Error fetching user: {e}")
+    response = await http_client.get(f"{URL}/rest/v1/users?id=eq.{user_id}&select=*", headers=HEADERS)
+    if response.status_code == 200 and response.json(): 
+        return response.json()[0]
+    elif response.status_code >= 500:
+        raise httpx.ReadTimeout(f"Server Error {response.status_code}: {response.text}")
+    elif response.status_code != 200:
+        print(f"[DB] Fetch user (ID) failed: {response.status_code} {response.text[:200]}")
     return None
 
+@db_retry(retries=3, backoff=1.5)
 async def get_user_by_email(email: str) -> Optional[Dict]:
-    try:
-        response = await http_client.get(f"{URL}/rest/v1/users?email=eq.{email}&select=*", headers=HEADERS)
-        if response.status_code == 200 and response.json(): return response.json()[0]
-    except Exception as e: print(f"[DB] Error fetching user by email: {e}")
+    response = await http_client.get(f"{URL}/rest/v1/users?email=eq.{email}&select=*", headers=HEADERS)
+    if response.status_code == 200 and response.json(): 
+        return response.json()[0]
+    elif response.status_code >= 500:
+        raise httpx.ReadTimeout(f"Server Error {response.status_code}: {response.text}")
+    elif response.status_code != 200:
+        print(f"[DB] Fetch user (Email) failed: {response.status_code} {response.text[:200]}")
     return None
 
 async def create_user(email: str = None, apple_id: str = None) -> Optional[Dict]:
@@ -152,19 +199,19 @@ async def create_user(email: str = None, apple_id: str = None) -> Optional[Dict]
     except Exception as e: print(f"[DB] Error creating user: {e}")
     return None
 
+@db_retry(retries=2, backoff=2.0)
 async def update_user(user_id: str, data: Dict, return_details: bool = False) -> Any:
-    try:
-        data["updated_at"] = datetime.now(timezone.utc).isoformat()
-        response = await http_client.patch(f"{URL}/rest/v1/users?id=eq.{user_id}", headers=HEADERS, json=data)
-        success = response.status_code in [200, 201, 204]
-        if return_details:
-            msg = "Success" if success else f"DB Error {response.status_code}: {response.text}"
-            return success, msg
-        return success
-    except Exception as e:
-        print(f"[DB] Error updating user: {e}")
-        if return_details: return False, str(e)
-    return False
+    data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    response = await http_client.patch(f"{URL}/rest/v1/users?id=eq.{user_id}", headers=HEADERS, json=data)
+    success = response.status_code in [200, 201, 204]
+    if not success and response.status_code >= 500:
+        raise httpx.ReadTimeout(f"Server Error {response.status_code}: {response.text}")
+    if not success:
+        print(f"[DB] Update failed: {response.status_code} {response.text[:200]}")
+    if return_details:
+        msg = "Success" if success else f"DB Error {response.status_code}: {response.text}"
+        return success, msg
+    return success
 
 async def verify_premium_status(user_id: str, user_data: Dict = None, background_tasks: BackgroundTasks = None) -> bool:
     """Strictly verify premium status, especially if source is Telegram"""
@@ -291,38 +338,44 @@ async def send_email_via_resend(to_email: str, subject: str, html_content: str):
 def generate_verification_code() -> str:
     return ''.join(random.choice(string.digits) for _ in range(6))
 
+@db_retry(retries=3, backoff=2.0)
 async def get_verification_code_from_supabase(email: str) -> Optional[Dict]:
-    try:
-        response = await http_client.get(f"{URL}/rest/v1/email_verifications?email=eq.{email}&select=*", headers=HEADERS)
-        if response.status_code == 200 and response.json():
-            return response.json()[0]
-    except Exception as e:
-        print(f"[DB] Error fetching verification code: {e}")
+    response = await http_client.get(f"{URL}/rest/v1/email_verifications?email=eq.{email}&select=*", headers=HEADERS)
+    if response.status_code == 200 and response.json():
+        return response.json()[0]
+    elif response.status_code >= 500:
+        raise httpx.ReadTimeout(f"Server Error {response.status_code}: {response.text}")
+    elif response.status_code != 200:
+        print(f"[DB] Fetch verification failed: {response.status_code} {response.text[:200]}")
     return None
 
+@db_retry(retries=3, backoff=2.0)
 async def upsert_verification_code_to_supabase(email: str, code: str, expires_at: str) -> bool:
-    try:
-        payload = {
-            "email": email,
-            "code": code,
-            "expires_at": expires_at,
-            "created_at": datetime.now(timezone.utc).isoformat()
-        }
-        # Use upsert (on_conflict email)
-        headers = {**HEADERS, "Prefer": "resolution=merge-duplicates,return=representation"}
-        response = await http_client.post(f"{URL}/rest/v1/email_verifications", headers=headers, json=payload)
-        return response.status_code in [200, 201]
-    except Exception as e:
-        print(f"[DB] Error upserting verification code: {e}")
-    return False
+    payload = {
+        "email": email,
+        "code": code,
+        "expires_at": expires_at,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    # Use upsert (on_conflict email)
+    headers = {**HEADERS, "Prefer": "resolution=merge-duplicates,return=representation"}
+    response = await http_client.post(f"{URL}/rest/v1/email_verifications", headers=headers, json=payload)
+    success = response.status_code in [200, 201]
+    if not success and response.status_code >= 500:
+        raise httpx.ReadTimeout(f"Server Error {response.status_code}: {response.text}")
+    if not success:
+        print(f"[DB] Upsert verification failed: {response.status_code} {response.text[:200]}")
+    return success
 
+@db_retry(retries=3, backoff=2.0)
 async def delete_verification_code_from_supabase(email: str) -> bool:
-    try:
-        response = await http_client.delete(f"{URL}/rest/v1/email_verifications?email=eq.{email}", headers=HEADERS)
-        return response.status_code in [200, 204]
-    except Exception as e:
-        print(f"[DB] Error deleting verification code: {e}")
-    return False
+    response = await http_client.delete(f"{URL}/rest/v1/email_verifications?email=eq.{email}", headers=HEADERS)
+    success = response.status_code in [200, 204]
+    if not success and response.status_code >= 500:
+        raise httpx.ReadTimeout(f"Server Error {response.status_code}: {response.text}")
+    if not success:
+        print(f"[DB] Delete verification failed: {response.status_code} {response.text[:200]}")
+    return success
 
 async def trigger_email_verification(email: str, force: bool = False):
     """
@@ -438,8 +491,8 @@ async def verify_code(data: Dict = Body(...)):
     if not stored: raise HTTPException(status_code=404, detail="No verification pending for this email")
     
     # Check expiry
-    expiry = datetime.fromisoformat(stored["expires_at"].replace('Z', '+00:00'))
-    if datetime.now(timezone.utc) > expiry:
+    expiry = safe_parse_dt(stored["expires_at"])
+    if not expiry or datetime.now(timezone.utc) > expiry:
         raise HTTPException(status_code=400, detail="Code expired. Please request a new one.")
         
     if stored["code"] != code:
@@ -452,8 +505,13 @@ async def verify_code(data: Dict = Body(...)):
     success = await update_user(user["id"], {"email_verified": True})
     if not success: raise HTTPException(status_code=500, detail="Failed to update verification status")
     
-    # Clean up code in Supabase
+    # Clean up code and cache
     await delete_verification_code_from_supabase(email)
+    try:
+        user_cache.invalidate(f"user_status:{user['id']}")
+        print(f"[AUTH] Invalidated status cache for {email}")
+    except Exception as ce:
+        print(f"[AUTH] Cache invalidation skipped: {ce}")
     
     return {"success": True, "message": "Email verified successfully!"}
 

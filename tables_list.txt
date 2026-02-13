@@ -1,0 +1,9 @@
+alerts
+bot_cursor
+categories
+discord_messages
+email_verifications
+saved_deals
+telegram_link_tokens
+user_telegram_links
+users
