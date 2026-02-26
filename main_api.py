@@ -2352,7 +2352,7 @@ async def get_cache_stats():
 
 # --- ADMIN MANAGEMENT ENDPOINTS ---
 
-ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "hollow_admin_secret_2024")
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
 
 async def verify_admin_key(x_admin_key: str = Header(None)):
     if not x_admin_key or x_admin_key != ADMIN_API_KEY:
