@@ -12,3 +12,8 @@ playwright==1.40.0
 beautifulsoup4
 Pillow
 stripe
+python-jose[cryptography]
+passlib[bcrypt]
+fastapi
+uvicorn
+python-multipart

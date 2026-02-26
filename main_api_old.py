@@ -12,6 +12,7 @@ import httpx
 import asyncio
 import re
 import time
+from collections import defaultdict
 
 import os
 import json
@@ -25,6 +26,9 @@ from dotenv import load_dotenv
 from supabase_utils import get_supabase_config, sanitize_text
 from functools import lru_cache
 from contextlib import asynccontextmanager
+
+from cache_utils import feed_cache, product_list_cache, user_cache, categories_cache
+
 
 # --- HELPER: Robust Timestamp Parsing ---
 def safe_parse_dt(dt_str: str) -> Optional[datetime]:
@@ -54,10 +58,23 @@ http_client: Optional[httpx.AsyncClient] = None
 async def lifespan(app: FastAPI):
     """Manage app lifespan with persistent HTTP client"""
     global http_client
-    limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
-    timeout = httpx.Timeout(20.0, connect=5.0)
-    http_client = httpx.AsyncClient(limits=limits, timeout=timeout, http2=True)
-    print("[STARTUP] HTTP client initialized with connection pooling")
+    limits = httpx.Limits(max_keepalive_connections=50, max_connections=200)
+    # INCREASED TIMEOUTS FOR SLOW NETWORKS
+    timeout = httpx.Timeout(60.0, connect=30.0, read=60.0, write=60.0, pool=30.0)
+    http_client = httpx.AsyncClient(limits=limits, timeout=timeout, http2=False)
+    print("[STARTUP] HTTP client initialized (HTTP/2 Disabled for compatibility)")
+    
+    # Verify DB connectivity (With extra patient 90s timeout for startup)
+    try:
+        # Ping users table for a more reliable check than the root endpoint
+        resp = await http_client.get(f"{URL}/rest/v1/users?limit=1", headers=HEADERS, timeout=90.0)
+        if resp.status_code == 200:
+            print("[STARTUP] Supabase connection: ✅ OK (Patience wins!)")
+        else:
+            print(f"[STARTUP] Supabase connection: ⚠️ FAILED (HTTP {resp.status_code})")
+            print(f"          Response: {resp.text[:200]}")
+    except Exception as e:
+        print(f"[STARTUP] Supabase connection: ❌ ERROR ({repr(e)})")
     
     # Start background worker
     asyncio.create_task(background_notification_worker())
@@ -78,6 +95,16 @@ SUPABASE_BUCKET = "monitor-data"
 # Global storage for push tokens (Move to DB irl)
 USER_PUSH_TOKENS = {} # {user_id: [tokens]}
 LAST_PUSH_CHECK_TIME = datetime.now(timezone.utc)
+RECENT_ALERTS_LOG = [] # [(signature, timestamp)] to prevent duplicate spam
+
+def _log_push(msg):
+    try:
+        with open("push_debug.log", "a") as f:
+            f.write(f"[{datetime.now().isoformat()}] {msg}\n")
+    except: pass
+
+# Cache Stampede Protection: Ensures only 1 request hits DB for a specific filter set
+PENDING_READS: Dict[str, asyncio.Event] = {}
 
 
 DEFAULT_CHANNELS = [
@@ -114,18 +141,52 @@ def optimize_image_url(url: str) -> str:
     except: pass
     return url
 
+def db_retry(retries: int = 5, backoff: float = 1.0):
+    """Decorator to retry DB operations on timeout or transient errors"""
+    def decorator(func):
+        async def wrapper(*args, **kwargs):
+            for i in range(retries):
+                try:
+                    result = await func(*args, **kwargs)
+                    # Handle logical failures that should be retried (e.g. 500 statement timeouts)
+                    # If the function returns (False, msg) or similar, we can check it
+                    if isinstance(result, tuple) and len(result) == 2:
+                        success, detail = result
+                        if not success and ("57014" in str(detail) or "timeout" in str(detail).lower()):
+                            raise httpx.ReadTimeout(f"Logical Timeout: {detail}")
+                    return result
+                except (httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+                    wait = backoff * (2 ** i)
+                    print(f"[RETRY] {func.__name__} failed ({type(e).__name__}). attempt {i+1}/{retries} in {wait}s...")
+                    await asyncio.sleep(wait)
+                except Exception as e:
+                    print(f"[DB] Fatal error in {func.__name__}: {repr(e)}")
+                    raise e
+            print(f"[RETRY] {func.__name__} exhausted all {retries} retries.")
+            return None
+        return wrapper
+    return decorator
+
+@db_retry(retries=3, backoff=1.5)
 async def get_user_by_id(user_id: str) -> Optional[Dict]:
-    try:
-        response = await http_client.get(f"{URL}/rest/v1/users?id=eq.{user_id}&select=*", headers=HEADERS)
-        if response.status_code == 200 and response.json(): return response.json()[0]
-    except Exception as e: print(f"[DB] Error fetching user: {e}")
+    response = await http_client.get(f"{URL}/rest/v1/users?id=eq.{user_id}&select=*", headers=HEADERS)
+    if response.status_code == 200 and response.json(): 
+        return response.json()[0]
+    elif response.status_code >= 500:
+        raise httpx.ReadTimeout(f"Server Error {response.status_code}: {response.text}")
+    elif response.status_code != 200:
+        print(f"[DB] Fetch user (ID) failed: {response.status_code} {response.text[:200]}")
     return None
 
+@db_retry(retries=3, backoff=1.5)
 async def get_user_by_email(email: str) -> Optional[Dict]:
-    try:
-        response = await http_client.get(f"{URL}/rest/v1/users?email=eq.{email}&select=*", headers=HEADERS)
-        if response.status_code == 200 and response.json(): return response.json()[0]
-    except Exception as e: print(f"[DB] Error fetching user by email: {e}")
+    response = await http_client.get(f"{URL}/rest/v1/users?email=eq.{email}&select=*", headers=HEADERS)
+    if response.status_code == 200 and response.json(): 
+        return response.json()[0]
+    elif response.status_code >= 500:
+        raise httpx.ReadTimeout(f"Server Error {response.status_code}: {response.text}")
+    elif response.status_code != 200:
+        print(f"[DB] Fetch user (Email) failed: {response.status_code} {response.text[:200]}")
     return None
 
 async def create_user(email: str = None, apple_id: str = None) -> Optional[Dict]:
@@ -138,19 +199,56 @@ async def create_user(email: str = None, apple_id: str = None) -> Optional[Dict]
     except Exception as e: print(f"[DB] Error creating user: {e}")
     return None
 
+@db_retry(retries=2, backoff=2.0)
 async def update_user(user_id: str, data: Dict, return_details: bool = False) -> Any:
+    data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    response = await http_client.patch(f"{URL}/rest/v1/users?id=eq.{user_id}", headers=HEADERS, json=data)
+    success = response.status_code in [200, 201, 204]
+    if not success and response.status_code >= 500:
+        raise httpx.ReadTimeout(f"Server Error {response.status_code}: {response.text}")
+    if not success:
+        print(f"[DB] Update failed: {response.status_code} {response.text[:200]}")
+    if return_details:
+        msg = "Success" if success else f"DB Error {response.status_code}: {response.text}"
+        return success, msg
+    return success
+
+@db_retry(retries=3, backoff=2.0)
+async def delete_user_by_email(email: str) -> bool:
+    """Helper to delete a user and all related data by email"""
+    user = await get_user_by_email(email)
+    if not user:
+        return False
+    
+    user_id = user["id"]
+    
+    # 1. Delete from Supabase (Cascade handles user_telegram_links and saved_deals)
+    response = await http_client.delete(f"{URL}/rest/v1/users?id=eq.{user_id}", headers=HEADERS)
+    if response.status_code not in [200, 204]:
+        print(f"[DB] Delete user from Supabase failed: {response.status_code} {response.text}")
+        return False
+
+    # 2. Cleanup verification codes
+    await delete_verification_code_from_supabase(email)
+
+    # 3. Local Push Token Cleanup
+    if user_id in USER_PUSH_TOKENS:
+        del USER_PUSH_TOKENS[user_id]
+        try:
+            os.makedirs("data", exist_ok=True)
+            with open("data/push_tokens.json", "w") as f:
+                json.dump(USER_PUSH_TOKENS, f)
+            print(f"[AUTH] Cleaned up push tokens for deleted user {user_id}")
+        except: pass
+
+    # 4. Cache Invalidation
     try:
-        data["updated_at"] = datetime.now(timezone.utc).isoformat()
-        response = await http_client.patch(f"{URL}/rest/v1/users?id=eq.{user_id}", headers=HEADERS, json=data)
-        success = response.status_code in [200, 201, 204]
-        if return_details:
-            msg = "Success" if success else f"DB Error {response.status_code}: {response.text}"
-            return success, msg
-        return success
-    except Exception as e:
-        print(f"[DB] Error updating user: {e}")
-        if return_details: return False, str(e)
-    return False
+        user_cache.invalidate(f"user_status:{user_id}")
+        user_cache.invalidate(f"user_profile:{user_id}")
+        print(f"[AUTH] Invalidated cache for deleted user {email}")
+    except: pass
+
+    return True
 
 async def verify_premium_status(user_id: str, user_data: Dict = None, background_tasks: BackgroundTasks = None) -> bool:
     """Strictly verify premium status, especially if source is Telegram"""
@@ -277,38 +375,44 @@ async def send_email_via_resend(to_email: str, subject: str, html_content: str):
 def generate_verification_code() -> str:
     return ''.join(random.choice(string.digits) for _ in range(6))
 
+@db_retry(retries=3, backoff=2.0)
 async def get_verification_code_from_supabase(email: str) -> Optional[Dict]:
-    try:
-        response = await http_client.get(f"{URL}/rest/v1/email_verifications?email=eq.{email}&select=*", headers=HEADERS)
-        if response.status_code == 200 and response.json():
-            return response.json()[0]
-    except Exception as e:
-        print(f"[DB] Error fetching verification code: {e}")
+    response = await http_client.get(f"{URL}/rest/v1/email_verifications?email=eq.{email}&select=*", headers=HEADERS)
+    if response.status_code == 200 and response.json():
+        return response.json()[0]
+    elif response.status_code >= 500:
+        raise httpx.ReadTimeout(f"Server Error {response.status_code}: {response.text}")
+    elif response.status_code != 200:
+        print(f"[DB] Fetch verification failed: {response.status_code} {response.text[:200]}")
     return None
 
+@db_retry(retries=3, backoff=2.0)
 async def upsert_verification_code_to_supabase(email: str, code: str, expires_at: str) -> bool:
-    try:
-        payload = {
-            "email": email,
-            "code": code,
-            "expires_at": expires_at,
-            "created_at": datetime.now(timezone.utc).isoformat()
-        }
-        # Use upsert (on_conflict email)
-        headers = {**HEADERS, "Prefer": "resolution=merge-duplicates,return=representation"}
-        response = await http_client.post(f"{URL}/rest/v1/email_verifications", headers=headers, json=payload)
-        return response.status_code in [200, 201]
-    except Exception as e:
-        print(f"[DB] Error upserting verification code: {e}")
-    return False
+    payload = {
+        "email": email,
+        "code": code,
+        "expires_at": expires_at,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    # Use upsert (on_conflict email)
+    headers = {**HEADERS, "Prefer": "resolution=merge-duplicates,return=representation"}
+    response = await http_client.post(f"{URL}/rest/v1/email_verifications", headers=headers, json=payload)
+    success = response.status_code in [200, 201]
+    if not success and response.status_code >= 500:
+        raise httpx.ReadTimeout(f"Server Error {response.status_code}: {response.text}")
+    if not success:
+        print(f"[DB] Upsert verification failed: {response.status_code} {response.text[:200]}")
+    return success
 
+@db_retry(retries=3, backoff=2.0)
 async def delete_verification_code_from_supabase(email: str) -> bool:
-    try:
-        response = await http_client.delete(f"{URL}/rest/v1/email_verifications?email=eq.{email}", headers=HEADERS)
-        return response.status_code in [200, 204]
-    except Exception as e:
-        print(f"[DB] Error deleting verification code: {e}")
-    return False
+    response = await http_client.delete(f"{URL}/rest/v1/email_verifications?email=eq.{email}", headers=HEADERS)
+    success = response.status_code in [200, 204]
+    if not success and response.status_code >= 500:
+        raise httpx.ReadTimeout(f"Server Error {response.status_code}: {response.text}")
+    if not success:
+        print(f"[DB] Delete verification failed: {response.status_code} {response.text[:200]}")
+    return success
 
 async def trigger_email_verification(email: str, force: bool = False):
     """
@@ -424,8 +528,8 @@ async def verify_code(data: Dict = Body(...)):
     if not stored: raise HTTPException(status_code=404, detail="No verification pending for this email")
     
     # Check expiry
-    expiry = datetime.fromisoformat(stored["expires_at"].replace('Z', '+00:00'))
-    if datetime.now(timezone.utc) > expiry:
+    expiry = safe_parse_dt(stored["expires_at"])
+    if not expiry or datetime.now(timezone.utc) > expiry:
         raise HTTPException(status_code=400, detail="Code expired. Please request a new one.")
         
     if stored["code"] != code:
@@ -438,8 +542,13 @@ async def verify_code(data: Dict = Body(...)):
     success = await update_user(user["id"], {"email_verified": True})
     if not success: raise HTTPException(status_code=500, detail="Failed to update verification status")
     
-    # Clean up code in Supabase
+    # Clean up code and cache
     await delete_verification_code_from_supabase(email)
+    try:
+        user_cache.invalidate(f"user_status:{user['id']}")
+        print(f"[AUTH] Invalidated status cache for {email}")
+    except Exception as ce:
+        print(f"[AUTH] Cache invalidation skipped: {ce}")
     
     return {"success": True, "message": "Email verified successfully!"}
 
@@ -592,6 +701,22 @@ async def change_password(data: Dict = Body(...)):
     else:
         raise HTTPException(status_code=500, detail="Failed to update password")
 
+@app.delete("/v1/user/account")
+async def delete_account(email: str = Query(...)):
+    """Delete a user account by email address"""
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+    
+    success = await delete_user_by_email(email)
+    if not success:
+        # Check if user exists first to provide better error
+        user = await get_user_by_email(email)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=500, detail="Failed to delete account")
+    
+    return {"success": True, "message": f"Account for {email} deleted successfully"}
+
 # Sends push notification via Expo Push API
 async def send_expo_push_notification(tokens: List[str], title: str, body: str, data: Dict = None):
     """
@@ -714,20 +839,40 @@ async def get_bot_users_data():
 
 @app.get("/v1/user/status")
 async def get_user_status(background_tasks: BackgroundTasks, user_id: str = Query(...)):
-    """Get user's current subscription and verification status"""
+    """Get user's current subscription and verification status (cached)"""
+    
+    # Check cache first
+    cache_key = f"user_status:{user_id}"
+    cached_status = user_cache.get(cache_key)
+    
+    # SINGLEFLIGHT: Wait if another status check is in progress for this user
+    if cached_status is None:
+        if cache_key in PENDING_READS:
+            print(f"[USER CACHE] {user_id[:8]} Waiting for in-progress status check...")
+            await PENDING_READS[cache_key].wait()
+            cached_status = user_cache.get(cache_key)
+            if cached_status is not None:
+                print(f"[USER CACHE] {user_id[:8]} OK - Stampede avoided! Shared status result.")
+    
+    if cached_status is not None:
+        print(f"[USER CACHE] OK Hit for {user_id[:8]}...")
+        return cached_status
+    
+    print(f"[USER CACHE] MISS - Fetching from DB for {user_id[:8]}...")
+    
+    event = asyncio.Event()
+    PENDING_READS[cache_key] = event
+    
     try:
         user_data = await get_user_by_id(user_id)
         if not user_data:
             return {"success": False, "message": "User not found"}
 
-        # 1. Use strict verification for existing status
         is_premium = await verify_premium_status(user_id, user_data, background_tasks)
         subscription_end = user_data.get("subscription_end")
         
-        # 2. PROACTIVE: Also check Telegram linking status if not already premium
         if not is_premium:
             try:
-                # Check if user has a linked telegram account
                 links_resp = await http_client.get(
                     f"{URL}/rest/v1/user_telegram_links?user_id=eq.{user_id}&select=telegram_id",
                     headers=HEADERS
@@ -741,38 +886,54 @@ async def get_user_status(background_tasks: BackgroundTasks, user_id: str = Quer
                         if expiry_str:
                             try:
                                 exp_dt = datetime.fromisoformat(expiry_str.replace('Z', '+00:00'))
-                                if exp_dt.tzinfo is None: exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+                                if exp_dt.tzinfo is None: 
+                                    exp_dt = exp_dt.replace(tzinfo=timezone.utc)
                                 if exp_dt > datetime.now(timezone.utc):
                                     is_premium = True
                                     subscription_end = expiry_str
-                                    # Sync back to DB so subsequent checks are faster
                                     background_tasks.add_task(update_user, user_id, {
                                         "subscription_status": "active",
                                         "subscription_end": expiry_str,
                                         "subscription_source": "telegram"
                                     })
-                            except: pass
+                            except: 
+                                pass
             except Exception as e:
                 print(f"[STATUS] TG check failed: {e}")
 
-        return {
+        result = {
             "success": True,
             "is_premium": is_premium,
             "subscription_end": subscription_end,
             "status": "active" if is_premium else "free",
-            "subscription_status": "active" if is_premium else "free", # Keeping both for safety
+            "subscription_status": "active" if is_premium else "free",
             "email_verified": user_data.get("email_verified", False),
-            "is_verified": user_data.get("email_verified", False), # Keeping both for safety
+            "is_verified": user_data.get("email_verified", False),
             "email": user_data.get("email"),
             "name": user_data.get("name"),
             "bio": user_data.get("bio"),
             "location": user_data.get("location"),
             "avatar_url": user_data.get("avatar_url"),
-            "region": user_data.get("region", "USA Stores")
+            "region": user_data.get("region", "USA Stores"),
+            "notification_preferences": user_data.get("notification_preferences") or {
+                "enabled": True,
+                "regions": ["USA Stores", "UK Stores", "Canada Stores"],
+                "categories": [],
+                "min_discount_percent": 0
+            }
         }
+        
+        # CACHE THE RESULT
+        user_cache.set(cache_key, result)
+        return result
+        
     except Exception as e:
         print(f"[STATUS] Error: {e}")
         return {"success": False, "message": str(e)}
+    finally:
+        if cache_key in PENDING_READS and PENDING_READS[cache_key] == event:
+            event.set()
+            del PENDING_READS[cache_key]
 
 # --- USER PROFILE ENDPOINTS ---
 
@@ -798,6 +959,8 @@ async def update_user_profile(profile: UserProfileUpdate):
             
         success, msg = await update_user(profile.user_id, data, return_details=True)
         if success:
+            # INVALIDATE CACHE
+            user_cache.invalidate(f"user_status:{profile.user_id}")
             return {"success": True, "message": "Profile updated successfully"}
         else:
             return {"success": False, "message": f"Failed: {msg}"}
@@ -809,9 +972,32 @@ async def update_user_profile(profile: UserProfileUpdate):
 
 @app.get("/v1/user/telegram/link-status")
 async def get_telegram_link_status_endpoint(user_id: str = Query(...)):
-    print(f"[DEBUG] Checking Telegram status for user: '{user_id}'")
+    """Get user's telegram link status (cached & protected)"""
+    
+    cache_key = f"tg_link_status:{user_id}"
+    cached_link = user_cache.get(cache_key)
+    
+    # SINGLEFLIGHT: Wait if another check is in progress
+    if cached_link is None:
+        if cache_key in PENDING_READS:
+            print(f"[LINK CACHE] {user_id[:8]} Waiting for link status check...")
+            await PENDING_READS[cache_key].wait()
+            cached_link = user_cache.get(cache_key)
+            if cached_link is not None:
+                print(f"[LINK CACHE] {user_id[:8]} OK - Stampede avoided! Shared link status.")
+    
+    if cached_link is not None:
+        return cached_link
+
+    print(f"[LINK CACHE] MISS - Fetching from DB for {user_id[:8]}...")
+    
+    event = asyncio.Event()
+    PENDING_READS[cache_key] = event
+
     try:
         links = await get_telegram_links_for_user(user_id)
+        result = {"success": True, "linked": False}
+        
         if links:
             print(f"[DEBUG] Found {len(links)} links for user {user_id}")
             link = links[0]
@@ -830,20 +1016,16 @@ async def get_telegram_link_status_endpoint(user_id: str = Query(...)):
             
             if expiry_str:
                 try:
-                    # Simple ISO parse
                     expiry_dt = datetime.fromisoformat(expiry_str.replace('Z', '+00:00'))
                     if expiry_dt.tzinfo is None:
                         expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
-                        
-                    now_dt = datetime.now(timezone.utc)
-                    if expiry_dt > now_dt:
+                    if expiry_dt > datetime.now(timezone.utc):
                         is_premium = True
                         premium_until = expiry_str
-                except Exception as e:
-                    print(f"[DATE] Parse error: {e}")
+                except:
                     pass
 
-            return {
+            result = {
                 "success": True, 
                 "linked": True, 
                 "telegram_username": link.get("telegram_username"),
@@ -851,10 +1033,18 @@ async def get_telegram_link_status_endpoint(user_id: str = Query(...)):
                 "is_premium": is_premium,
                 "premium_until": premium_until
             }
-        return {"success": True, "linked": False}
+        
+        # Cache the result for 60s
+        user_cache.set(cache_key, result)
+        return result
+
     except Exception as e:
         print(f"[LINK] Status Error: {e}")
         return {"success": False, "message": str(e)}
+    finally:
+        if cache_key in PENDING_READS and PENDING_READS[cache_key] == event:
+            event.set()
+            del PENDING_READS[cache_key]
 
 @app.post("/v1/user/telegram/link")
 async def link_telegram_endpoint(data: Dict = Body(...)):
@@ -933,6 +1123,9 @@ async def link_telegram_endpoint(data: Dict = Body(...)):
                 })
                 print(f"[LINK] Synced premium status for user {user_id} from Telegram {telegram_id}")
 
+            # INVALIDATE CACHE
+            user_cache.invalidate(f"user_status:{user_id}")
+
             # 4. Consume Token (Delete it)
             await http_client.delete(f"{URL}/rest/v1/telegram_link_tokens?token=eq.{token}", headers=HEADERS)
             return {"success": True, "message": "Account linked successfully" + (" and premium status synced!" if is_premium_telegram else "")}
@@ -999,6 +1192,9 @@ async def unlink_telegram_endpoint(data: Dict = Body(...)):
              })
              print(f"[LINK] Reset premium status for user {user_id} after unlinking Telegram")
 
+        # INVALIDATE CACHE
+        user_cache.invalidate(f"user_status:{user_id}")
+
         if response.status_code in [200, 204]:
              return {"success": True, "message": "Unlinked successfully and premium status reset."}
         return {"success": False, "message": "Failed to unlink"}
@@ -1006,144 +1202,192 @@ async def unlink_telegram_endpoint(data: Dict = Body(...)):
         print(f"[LINK] Unlink error: {e}")
         return {"success": False, "message": str(e)}
 
+def _parse_price_to_float(price_str: any) -> float:
+    if not price_str: return 0.0
+    try:
+        # Remove currency symbols and commas, keep digits and dots
+        clean = re.sub(r'[^0-9.]', '', str(price_str))
+        if not clean or clean == '.' or clean == '..': return 0.0
+        return float(clean)
+    except:
+        return 0.0
+
 async def background_notification_worker():
     """Background task to poll for new products and notify users"""
-    global LAST_PUSH_CHECK_TIME
+    global LAST_PUSH_CHECK_TIME, RECENT_ALERTS_LOG
     print("[PUSH] Worker started")
+    _log_push("Worker started")
     
     while True:
         try:
-            # CRITICAL: Sleep FIRST to prevent runaway loops
-            await asyncio.sleep(60)  # Check every 60 seconds
+            await asyncio.sleep(30)
+            if not http_client: continue
             
-            if not http_client:
-                print("[PUSH] Warning: http_client not initialized")
-                continue
-            
-            # Fetch users with timeout protection
             try:
-                response = await asyncio.wait_for(
-                    http_client.get(
-                        f"{URL}/rest/v1/users?push_tokens=not.is.null&select=id,notification_preferences,push_tokens",
-                        headers=HEADERS
-                    ),
-                    timeout=30.0
-                )
+                response = await asyncio.wait_for(http_client.get(f"{URL}/rest/v1/users?push_tokens=not.is.null&select=id,notification_preferences,push_tokens", headers=HEADERS), timeout=30.0)
                 users_data = [u for u in response.json() if u.get("push_tokens")] if response.status_code == 200 else []
-            except asyncio.TimeoutError:
-                print("[PUSH] Timeout fetching users")
-                continue
             except Exception as e:
-                print(f"[PUSH] Error fetching users: {e}")
+                _log_push(f"Error fetching users: {e}")
                 continue
             
-            if not users_data:
-                continue
+            if not users_data: continue
             
-            # Fetch messages with timeout
             try:
-                response = await asyncio.wait_for(
-                    http_client.get(
-                        f"{URL}/rest/v1/discord_messages?order=scraped_at.desc&limit=20",
-                        headers=HEADERS
-                    ),
-                    timeout=30.0
-                )
+                response = await asyncio.wait_for(http_client.get(f"{URL}/rest/v1/discord_messages?order=scraped_at.desc&limit=20", headers=HEADERS), timeout=30.0)
+                if response.status_code != 200: continue
+                messages = response.json()
                 
-                if response.status_code == 200 and response.json():
-                    messages = response.json()
-                    new_messages = [m for m in messages if safe_parse_dt(m.get("scraped_at")) and safe_parse_dt(m.get("scraped_at")) > LAST_PUSH_CHECK_TIME]
+                new_messages = [m for m in messages if safe_parse_dt(m.get("scraped_at")) and safe_parse_dt(m.get("scraped_at")) > LAST_PUSH_CHECK_TIME]
+                
+                if new_messages:
+                    print(f"[PUSH] {len(new_messages)} new products detected")
+                    _log_push(f"Processing {len(new_messages)} new messages")
                     
-                    if new_messages:
-                        print(f"[PUSH] {len(new_messages)} new products detected")
-                        processed_ids = set()
-                        
-                        for msg in new_messages:
-                            if msg.get("id") in processed_ids:
-                                continue
-                            processed_ids.add(msg.get("id"))
-                            
-                            # Process notification (wrapped in try-catch)
-                            try:
-                                # --- Professional Formatting Logic ---
-                                product_data = msg.get("product_data", {})
-                                
-                                # Filter users to get tokens
-                                target_tokens = []
-                                for u in users_data:
-                                    prefs = u.get("notification_preferences") or {}
-                                    if not prefs.get("enabled", True):
-                                        continue
-                                    tokens = u.get("push_tokens") or []
-                                    if isinstance(tokens, list):
-                                        target_tokens.extend(tokens)
+                    try: product_list_cache.invalidate("feed_global")
+                    except: pass
+                    
+                    channels = await get_channels_data()
+                    channel_map = {c['id']: {'category': c.get('category', 'USA Stores').strip(), 'name': c.get('name', 'Unknown').strip()} for c in channels if c.get('enabled', True)}
+                    for c in DEFAULT_CHANNELS:
+                        if c['id'] not in channel_map: channel_map[c['id']] = {'category': c.get('category', 'USA Stores').strip(), 'name': c.get('name', 'Unknown').strip()}
 
-                                title_raw = str(product_data.get("title") or "Deal Alert")
-                                price = product_data.get("price")
-                                was_price = product_data.get("was_price") or product_data.get("resell")
-                                
-                                # 1. Build Title with Discount Info
-                                discount_prefix = "🎉 "
-                                try:
-                                    if price and was_price:
-                                        p_val = float(str(price).replace('$', '').replace(',', '').strip())
-                                        w_val = float(str(was_price).replace('$', '').replace(',', '').strip())
-                                        if w_val > p_val and p_val > 0:
-                                            disc = int(((w_val - p_val) / w_val) * 100)
-                                            if disc >= 10:
-                                                discount_prefix = f"📉 {disc}% OFF: "
-                                except: pass
-                                
-                                final_title = f"{discount_prefix}{title_raw[:45]}..." if len(title_raw) > 45 else f"{discount_prefix}{title_raw}"
-                                
-                                # 2. Build Body with Store & Prices
-                                body_parts = []
-                                if price and str(price) not in ["0.0", "N/A", "0"]:
-                                    body_parts.append(f"Now: ${price}")
-                                if was_price and str(was_price) not in ["0.0", "N/A", "0"] and was_price != price:
-                                    body_parts.append(f"Was: ${was_price}")
-                                
-                                store_label = msg.get("category_name", "HollowScan")
-                                region_label = msg.get("region", "").replace(" Stores", "")
-                                body_parts.append(f"{region_label} {store_label}".strip())
-                                
-                                final_body = " | ".join(body_parts)
-                                
-                                if target_tokens:
-                                    await send_expo_push_notification(
-                                        list(set(target_tokens)), 
-                                        final_title, 
-                                        final_body, 
-                                        {"product_id": str(msg["id"])}
-                                    )
-                            except Exception as msg_err:
-                                print(f"[PUSH] Error processing message: {msg_err}")
+                    # Clean up old signatures (older than 15 mins)
+                    cutoff = datetime.now() - timedelta(minutes=15)
+                    RECENT_ALERTS_LOG = [x for x in RECENT_ALERTS_LOG if x[1] > cutoff]
+                    current_batch_signatures = set()
+                    max_msg_time = LAST_PUSH_CHECK_TIME
+
+                    for msg in new_messages:
+                        msg_id = msg.get("id")
+                        m_time = safe_parse_dt(msg.get("scraped_at"))
+                        if m_time and m_time > max_msg_time: max_msg_time = m_time
                         
-                        LAST_PUSH_CHECK_TIME = datetime.now(timezone.utc)
+                        try:
+                            # Content Deduplication
+                            sig = _get_content_signature(msg)
+                            if sig in current_batch_signatures or any(x[0] == sig for x in RECENT_ALERTS_LOG):
+                                _log_push(f"Skipping duplicate signature {sig} for message {msg_id}")
+                                continue
+                            
+                            # TRANSFORM & QUALIFY
+                            product = extract_product(msg, channel_map)
+                            if not product: continue
+                            
+                            p_data = product.get("product_data", {})
+                            
+                            # QUALITY QUALIFICATION (Matches Home Feed)
+                            has_image = p_data.get("image") and "placeholder" not in p_data.get("image")
+                            has_links = bool(p_data.get("buy_url") or (p_data.get("links") and any(p_data["links"].values())))
+                            
+                            price_val = _parse_price_to_float(p_data.get("price"))
+                            was_val = _parse_price_to_float(p_data.get("was_price"))
+                            resell_val = _parse_price_to_float(p_data.get("resell"))
+                            
+                            has_any_price = price_val > 0 or resell_val > 0 or was_val > 0
+                            
+                            if not (has_image or has_any_price or has_links):
+                                _log_push(f"Skipping msg {msg_id} - Low quality")
+                                continue
+
+                            # DISCOUNT CALCULATION
+                            current_discount = 0
+                            if resell_val > price_val and price_val > 0:
+                                current_discount = 100 # Profit deals bypass min %
+                            elif was_val > price_val and price_val > 0:
+                                current_discount = int(((was_val - price_val) / was_val) * 100)
+
+                            # FILTER USERS
+                            region_raw = product.get("region", "USA Stores")
+                            store_label = product.get("category_name", "HollowScan")
+                            title_raw = str(p_data.get("title") or "Deal Alert")
+                            
+                            target_tokens = []
+                            for u in users_data:
+                                prefs = u.get("notification_preferences") or {}
+                                if not prefs.get("enabled", True): continue
+                                if prefs.get("regions") and region_raw not in prefs["regions"]: continue
+                                if prefs.get("categories") and len(prefs["categories"]) > 0 and "ALL" not in [c.upper() for c in prefs["categories"]]:
+                                    if store_label not in prefs["categories"]: continue
+                                if current_discount < prefs.get("min_discount_percent", 0): continue
+                                tokens = u.get("push_tokens") or []
+                                if isinstance(tokens, list): target_tokens.extend(tokens)
+
+                            if not target_tokens: continue
+
+                            # PROFESSIONAL FORMATTING
+                            region_label = region_raw.replace(" Stores", "").strip()
+                            currency = "£" if "UK" in region_raw.upper() else "$"
+                            
+                            discount_prefix = "🎉 "
+                            if resell_val > price_val:
+                                discount_prefix = f"💰 {currency}{resell_val - price_val:.2f} Profit: "
+                            elif current_discount >= 5 and was_val > 0:
+                                discount_prefix = f"📉 {current_discount}% OFF: "
+
+                            final_title = f"{discount_prefix}{title_raw[:45]}..." if len(title_raw) > 45 else f"{discount_prefix}{title_raw}"
+                            
+                            body_parts = []
+                            price_info = ""
+                            if price_val > 0:
+                                price_info = f"Now: {currency}{p_data['price']}"
+                                if was_val > price_val:
+                                    price_info += f" (Was {currency}{p_data['was_price']})"
+                            elif resell_val > 0:
+                                price_info = f"Resell: {currency}{p_data['resell']}"
+                            
+                            if price_info: body_parts.append(price_info)
+                            body_parts.append(f"Store: {store_label}")
+                            if region_label: body_parts.append(f"Reg: {region_label}")
+                            final_body = " | ".join(body_parts)
+                            
+                            await send_expo_push_notification(list(set(target_tokens)), final_title, final_body, {"product_id": str(msg_id), "image": p_data.get("image")})
+                            
+                            current_batch_signatures.add(sig)
+                            RECENT_ALERTS_LOG.append((sig, datetime.now()))
+
+                        except Exception as msg_err:
+                            _log_push(f"Error processing message {msg_id}: {msg_err}")
+                    
+                    LAST_PUSH_CHECK_TIME = max_msg_time
                         
             except asyncio.TimeoutError:
-                print("[PUSH] Timeout fetching messages")
+                _log_push("Timeout fetching messages")
             except Exception as e:
-                print(f"[PUSH] Error processing: {e}")
+                _log_push(f"Error in push loop: {e}")
                 
-        except asyncio.CancelledError:
-            print("[PUSH] Worker shutdown")
-            break
+        except asyncio.CancelledError: break
         except Exception as e:
-            print(f"[PUSH] CRITICAL: {type(e).__name__}: {e}")
-            await asyncio.sleep(60)  # Prevent rapid failure loop
-    
+            _log_push(f"CRITICAL Worker error: {e}")
+            await asyncio.sleep(60)
+
     print("[PUSH] Worker stopped")
 
 @app.post("/v1/auth/login")
 async def login(background_tasks: BackgroundTasks, data: Dict = Body(...)):
     email = data.get("email")
     password = data.get("password")
-    if not email or not password: raise HTTPException(status_code=400, detail="Email and password are required")
+    if not email or not password:
+        print(f"[AUTH] Missing email or password in request data: {data.keys()}")
+        raise HTTPException(status_code=400, detail="Email and password are required")
+    
     user = await get_user_by_email(email)
-    if not user: raise HTTPException(status_code=401, detail="Invalid email or password")
+    if not user:
+        print(f"[AUTH] User not found for email: {email}")
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+        
     stored_hash = user.get("password_hash")
-    if not stored_hash or stored_hash != hash_password(password): raise HTTPException(status_code=401, detail="Invalid email or password")
+    provided_hash = hash_password(password)
+    
+    if not stored_hash:
+        print(f"[AUTH] User {email} has no password_hash in DB")
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+        
+    if stored_hash != provided_hash:
+        print(f"[AUTH] Password mismatch for {email}")
+        # print(f"DEBUG: stored={stored_hash}, provided={provided_hash}")
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    
+    print(f"[AUTH] Login successful for {email}")
     
     is_verified = user.get("email_verified", False)
     is_premium = user.get("subscription_status") == "active"
@@ -1402,6 +1646,15 @@ async def root():
 
 @app.get("/v1/categories")
 async def get_categories():
+    # Check cache first
+    cache_key = "categories"
+    cached_result = categories_cache.get(cache_key)
+    if cached_result is not None:
+        print("[CATEGORIES CACHE] OK Hit")
+        return cached_result
+    
+    print("[CATEGORIES CACHE] MISS Miss - Fetching from storage")
+    
     result = {}
     channels = []
     source = "none"
@@ -1411,8 +1664,8 @@ async def get_categories():
         if channels_response.status_code == 200:
             channels = channels_response.json() or []
             source = "remote"
-            print(f"[CATEGORIES] ✓ Loaded {len(channels)} channels from remote")
-    except Exception as e: print(f"[CATEGORIES] ✗ Remote channels fetch failed: {type(e).__name__}: {e}")
+            print(f"[CATEGORIES] OK Loaded {len(channels)} channels from remote")
+    except Exception as e: print(f"[CATEGORIES] MISS Remote channels fetch failed: {type(e).__name__}: {e}")
     if not channels:
         for filename in ["data/channels_.json", "data/channels.json", "channels.json"]:
             if os.path.exists(filename):
@@ -1437,7 +1690,16 @@ async def get_categories():
     for region in result:
         result[region] = sorted(result[region])
         result[region].insert(0, "ALL")
-    return {"categories": result, "source": source, "channel_count": len(channels)}
+        
+    result_data = {
+        "categories": result, 
+        "source": source, 
+        "channel_count": len(channels)
+    }
+    
+    # Cache it
+    categories_cache.set(cache_key, result_data)
+    return result_data
 
 async def get_channels_data():
     """Helper to fetch channels from storage or local fallback"""
@@ -1459,168 +1721,242 @@ async def get_channels_data():
     return channels or DEFAULT_CHANNELS
 
 @app.get("/v1/feed")
-async def get_feed(user_id: str, background_tasks: BackgroundTasks, region: Optional[str] = "ALL", category: Optional[str] = "ALL", offset: int = 0, limit: int = 20, country: Optional[str] = None, search: Optional[str] = None):
+async def get_feed(
+    user_id: str, 
+    background_tasks: BackgroundTasks, 
+    region: Optional[str] = "ALL", 
+    category: Optional[str] = "ALL", 
+    offset: int = 0, 
+    limit: int = 20, 
+    country: Optional[str] = None, 
+    search: Optional[str] = None,
+    force_refresh: bool = False  # NEW: Allow manual cache bypass
+):
+    # Normalize inputs
     if country and (not region or region == "ALL"): region = country
-    channels = await get_channels_data()
     
-    channel_map = {}
-    for c in channels:
-        if c.get('enabled', True): channel_map[c['id']] = {'category': c.get('category', 'USA Stores').strip(), 'name': c.get('name', 'Unknown').strip()}
-    for c in DEFAULT_CHANNELS:
-        if c['id'] not in channel_map: channel_map[c['id']] = {'category': c.get('category', 'USA Stores').strip(), 'name': c.get('name', 'Unknown').strip()}
+    # Generate base cache key (GLOBAL - shared across all users with same filters)
+    base_cache_key = product_list_cache.get_base_cache_key(region, category, search or "")
     
-    target_ids = []
-    if region and region.strip().upper() != "ALL":
-        req_reg = region.strip().upper()
-        if 'UK' in req_reg: norm_reg = 'UK'
-        elif 'CANADA' in req_reg or 'CA' in req_reg: norm_reg = 'CANADA'
-        else: norm_reg = 'USA'
-        for c in channels:
-            c_cat = (c.get('category') or '').upper()
-            c_name = (c.get('name') or '').upper()
-            is_region_match = norm_reg in c_cat or (norm_reg == 'USA' and 'US' in c_cat)
-            if category and category.strip().upper() != "ALL":
-                if is_region_match and c_name == category.strip().upper(): target_ids.append(c['id'])
-            elif is_region_match: target_ids.append(c['id'])
-    id_filter = ""
-    if target_ids: id_filter = f"&channel_id=in.({','.join(target_ids)})"
-    premium_user = False
+    # Check if we have cached results for this filter
+    cached_data = None
+    if not force_refresh:
+        cached_data = product_list_cache.get(base_cache_key)
+    
+    # SINGLEFLIGHT: Protect against Cache Stampede
+    if cached_data is None and not force_refresh:
+        if base_cache_key in PENDING_READS:
+            # Another request is already scanning for this key! Let's wait for it.
+            print(f"[FEED CACHE] {user_id[:8]} Waiting for in-progress DB scan...")
+            await PENDING_READS[base_cache_key].wait()
+            # Scan finished, now grab the result from cache
+            cached_data = product_list_cache.get(base_cache_key)
+            if cached_data is not None:
+                print(f"[FEED CACHE] {user_id[:8]} OK - Stampede avoided! Using result from concurrent scan.")
+    
+    # Still no data? We might be the first or it's a force refresh
+    event = None
+    if cached_data is None and not force_refresh:
+        event = asyncio.Event()
+        PENDING_READS[base_cache_key] = event
+
     try:
-        premium_user = await verify_premium_status(user_id, background_tasks=background_tasks)
-    except Exception as e: print(f"[FEED] Quota check error: {e}")
-    all_products = []
-    seen_signatures = set()
-    current_sql_offset = offset
-    chunks_scanned = 0
-    # Increase scan depth for searches (Premium gets 1,000,000 message potential lookback)
-    # Each request scans a chunk; has_more lets them keep "digging"
-    base_max = 50 if premium_user else 30
-    search_multiplier = 20 if search else 1
-    max_chunks = base_max * search_multiplier
-    batch_limit = 1000 if search else 50 # Much larger batches during search for speed
-    
-    db_end_reached = False
-    while len(all_products) < limit and chunks_scanned < max_chunks:
-        search_is_active = bool(search and search.strip())
-        query = f"order=scraped_at.desc&offset={current_sql_offset}&limit={batch_limit}"
+        all_products = []
+        current_sql_offset = offset
+        db_end_reached = False
+        cache_refill_mode = False
         
-        # Region/Category Filter ONLY if NOT searching (to make search truly GLOBAL)
-        if id_filter and not search_is_active:
-             query += id_filter
-             
-        if search_is_active:
-            keywords = [k.strip() for k in search.split() if len(k.strip()) >= 1]
-            if keywords:
-                or_parts = []
-                for k in keywords:
-                    # Optimized SQL Filter (Titles, Descriptions, Content, and Core Fields)
-                    or_parts.append(f"content.ilike.*{k}*")
-                    or_parts.append(f"raw_data->embeds->0->>title.ilike.*{k}*")
-                    or_parts.append(f"raw_data->embeds->0->>description.ilike.*{k}*")
-                    or_parts.append(f"raw_data->embed->>title.ilike.*{k}*")
-                    or_parts.append(f"raw_data->embed->>description.ilike.*{k}*")
-                    # Added back critical field checks for monitors that use them
-                    or_parts.append(f"raw_data->embeds->0->fields->0->>value.ilike.*{k}*")
-                    or_parts.append(f"raw_data->embeds->0->fields->1->>value.ilike.*{k}*")
-                    or_parts.append(f"raw_data->embeds->0->author->>name.ilike.*{k}*")
-                query += f"&or=({','.join(or_parts)})"
-                
-        try:
-            response = await http_client.get(f"{URL}/rest/v1/discord_messages?{query}", headers=HEADERS)
-            if response.status_code != 200: 
-                print(f"[FEED] Error {response.status_code}: {response.text}")
-                break
-            messages = response.json()
-            if not messages: 
-                db_end_reached = True
-                break
-                
-            for msg in messages:
-                sig = _get_content_signature(msg)
-                if sig in seen_signatures: continue
-                prod = extract_product(msg, channel_map)
-                if not prod: continue
-                
-                # Product refinement
-                p_data = prod.get("product_data", {})
-                price_val = p_data.get("price")
-                resale_val = p_data.get("resell")
-                was_val = p_data.get("was_price")
-                has_image = p_data.get("image") and "placeholder" not in p_data.get("image")
-                has_links = bool(p_data.get("buy_url") or (p_data.get("links") and any(p_data["links"].values())))
-                
-                try:
-                    p_num = float(str(price_val or 0).replace(',', ''))
-                    r_num = float(str(resale_val or 0).replace(',', ''))
-                    w_num = float(str(was_val or 0).replace(',', ''))
-                    has_any_price = p_num > 0 or r_num > 0 or w_num > 0
-                except (ValueError, TypeError): has_any_price = bool(price_val or resale_val or was_val)
-                
-                # Product qualification: MUST have an image OR a price OR a buy link (matching Home Feed)
-                if not (has_image or has_any_price or has_links): continue
-                
-                # Final Keyword Filter (OR logic on text blob)
-                if search_is_active:
-                    search_keywords = [k.lower().strip() for k in search.split() if k.strip()]
-                    search_blob = f"{prod['product_data'].get('title','')}\n{prod['product_data'].get('description','')}\n{prod.get('category_name','')}"
-                    for detail in prod["product_data"].get("details", []):
-                        search_blob += f"\n{detail.get('label','')}: {detail.get('value','')}"
-                    
-                    search_blob = search_blob.lower()
-                    match_found = False
-                    for kw in search_keywords:
-                        if kw in search_blob:
-                            match_found = True
-                            break
-                    if not match_found: continue
-
-                # Normal View Filtering (NOT for search)
-                if not search_is_active:
-                    if region and region.strip().upper() != "ALL":
-                        if prod["region"].strip() != region.strip(): continue
-                    if category and category.strip().upper() != "ALL":
-                        if prod["category_name"].upper().strip() != category.upper().strip(): continue
-                
-                all_products.append(prod)
-                seen_signatures.add(sig)
-                if len(all_products) >= limit: break
+        if cached_data is not None:
+            all_products, next_sql_offset, db_end_reached = cached_data
             
-            current_sql_offset += len(messages)
-            chunks_scanned += 1
-            # If we didn't find enough products but haven't hit the end, keep scanning
-            if len(messages) < batch_limit: 
-                db_end_reached = True
-                break
-        except Exception as e:
-            print(f"[FEED] Error in batch fetch: {e}")
-            break
+            # Check if requested page is already in research OR if DB is fully exhausted
+            # If we have enough products to satisfy the offset+limit, OR we know there's no more in DB, return hit
+            if (offset + limit <= len(all_products)) or db_end_reached:
+                print(f"[FEED CACHE] OK - Serving page from {len(all_products)} cached products")
+                
+                # Check premium status
+                premium_user = await verify_premium_status(user_id, background_tasks=background_tasks)
+                
+                # Slice for requested page
+                page_products = all_products[offset:offset+limit]
+                has_more = (offset + limit) < len(all_products) or (not db_end_reached)
+                
+                # Apply free user limits
+                if not premium_user:
+                    if len(page_products) > 4:
+                        page_products = page_products[:4]
+                        has_more = False
+                    for product in page_products:
+                        product["is_locked"] = False
+                
+                return {
+                    "products": page_products,
+                    "next_offset": offset + limit if has_more else offset + len(page_products),
+                    "has_more": has_more,
+                    "is_premium": premium_user,
+                    "total_count": len(all_products) if db_end_reached else len(all_products) + 100
+                }
+            else:
+                # AUTO-REFILL: We have some products, but user scrolled past them.
+                # Continue from the last scanned SQL offset.
+                print(f"[FEED CACHE] PARTIAL HIT - Refilling cache from SQL offset {next_sql_offset}...")
+                current_sql_offset = next_sql_offset
+                cache_refill_mode = True
+        else:
+            # Cache miss - fetch from scratch
+            print(f"[FEED CACHE] MISS - Fetching from DB for user {user_id[:8]}...")
+            all_products = []
+            current_sql_offset = offset
 
-    # Search Paging Logic:
-    has_more = not db_end_reached
-    
-    if not premium_user:
-        # Limit free users to 4 products total
-        if len(all_products) > 4:
-            all_products = all_products[:4]
-            has_more = False
-        for product in all_products: product["is_locked"] = False
+        # ======= DB FETCHING LOGIC =======
+        search_is_active = bool(search and search.strip())
+        channels = await get_channels_data()
         
-    print(f"[FEED] Search/Feed complete. Found {len(all_products)} products scanning {current_sql_offset - offset} messages.")
-    return {"products": all_products, "next_offset": current_sql_offset, "has_more": has_more, "is_premium": premium_user, "total_count": 100}
+        channel_map = {}
+        for c in channels:
+            if c.get('enabled', True): channel_map[c['id']] = {'category': c.get('category', 'USA Stores').strip(), 'name': c.get('name', 'Unknown').strip()}
+        for c in DEFAULT_CHANNELS:
+            if c['id'] not in channel_map: channel_map[c['id']] = {'category': c.get('category', 'USA Stores').strip(), 'name': c.get('name', 'Unknown').strip()}
+        
+        target_ids = []
+        if region and region.strip().upper() != "ALL":
+            req_reg = region.strip().upper()
+            if 'UK' in req_reg: norm_reg = 'UK'
+            elif 'CANADA' in req_reg or 'CA' in req_reg: norm_reg = 'CANADA'
+            else: norm_reg = 'USA'
+            for c in channels:
+                c_cat = (c.get('category') or '').upper()
+                c_name = (c.get('name') or '').upper()
+                is_region_match = norm_reg in c_cat or (norm_reg == 'USA' and 'US' in c_cat)
+                if category and category.strip().upper() != "ALL":
+                    if is_region_match and c_name == category.strip().upper(): target_ids.append(c['id'])
+                elif is_region_match: target_ids.append(c['id'])
+        id_filter = ""
+        if target_ids: id_filter = f"&channel_id=in.({','.join(target_ids)})"
+        
+        premium_user = await verify_premium_status(user_id, background_tasks=background_tasks)
+        
+        # Population seen_signatures for deduplication (especially important for refill)
+        seen_signatures = set()
+        if all_products:
+            for p in all_products:
+                if "content_signature" in p:
+                    seen_signatures.add(p["content_signature"])
+        
+        chunks_scanned = 0
+        base_max = 100 if premium_user else 30
+        search_multiplier = 20 if search else 1
+        max_chunks = base_max * search_multiplier
+        batch_limit = 1000 if search else 50
+        
+        # Target size for the cache fill
+        if cache_refill_mode:
+            cache_fill_target = len(all_products) + 50 # Add a small batch on refill
+        else:
+            cache_fill_target = 300 if search_is_active else 100
+        
+        db_end_reached = False
+        while len(all_products) < cache_fill_target and chunks_scanned < max_chunks:
+            query = f"order=scraped_at.desc&offset={current_sql_offset}&limit={batch_limit}"
+            if id_filter and not search_is_active: query += id_filter
+                 
+            if search_is_active:
+                keywords = [k.strip() for k in search.split() if len(k.strip()) >= 1]
+                if keywords:
+                    or_parts = []
+                    for k in keywords:
+                        or_parts.append(f"content.ilike.*{k}*")
+                        or_parts.append(f"raw_data->embeds->0->>title.ilike.*{k}*")
+                        or_parts.append(f"raw_data->embeds->0->>description.ilike.*{k}*")
+                        or_parts.append(f"raw_data->embed->>title.ilike.*{k}*")
+                        or_parts.append(f"raw_data->embed->>description.ilike.*{k}*")
+                        or_parts.append(f"raw_data->embeds->0->fields->0->>value.ilike.*{k}*")
+                        or_parts.append(f"raw_data->embeds->0->fields->1->>value.ilike.*{k}*")
+                        or_parts.append(f"raw_data->embeds->0->author->>name.ilike.*{k}*")
+                    query += f"&or=({','.join(or_parts)})"
+                    
+            try:
+                response = await http_client.get(f"{URL}/rest/v1/discord_messages?{query}", headers=HEADERS)
+                if response.status_code != 200: break
+                messages = response.json()
+                if not messages: 
+                    db_end_reached = True
+                    break
+                    
+                for msg in messages:
+                    sig = _get_content_signature(msg)
+                    if sig in seen_signatures: continue
+                    prod = extract_product(msg, channel_map)
+                    if not prod: continue
+                    
+                    # Filtering logic
+                    p_data = prod.get("product_data", {})
+                    has_image = p_data.get("image") and "placeholder" not in p_data.get("image")
+                    has_links = bool(p_data.get("buy_url") or (p_data.get("links") and any(p_data["links"].values())))
+                    try:
+                        p_num = float(str(p_data.get("price") or 0).replace(',', ''))
+                        r_num = float(str(p_data.get("resell") or 0).replace(',', ''))
+                        w_num = float(str(p_data.get("was_price") or 0).replace(',', ''))
+                        has_any_price = p_num > 0 or r_num > 0 or w_num > 0
+                    except: has_any_price = False
+                    
+                    if not (has_image or has_any_price or has_links): continue
+                    
+                    if search_is_active:
+                        search_keywords = [k.lower().strip() for k in search.split() if k.strip()]
+                        search_blob = f"{p_data.get('title','')}\n{p_data.get('description','')}\n{prod.get('category_name','')}".lower()
+                        if not any(kw in search_blob for kw in search_keywords): continue
+    
+                    if not search_is_active:
+                        if region and region.strip().upper() != "ALL" and prod["region"].strip() != region.strip(): continue
+                        if category and category.strip().upper() != "ALL" and prod["category_name"].upper().strip() != category.upper().strip(): continue
+                    
+                    prod["content_signature"] = sig # Ensure sig is stored for deduplication
+                    all_products.append(prod)
+                    seen_signatures.add(sig)
+                
+                current_sql_offset += len(messages)
+                chunks_scanned += 1
+                if len(messages) < batch_limit: 
+                    db_end_reached = True
+                    break
+            except Exception as e:
+                print(f"[FEED] Error in batch fetch: {e}")
+                break
+    
+        # Update cache with the potentially larger list
+        product_list_cache.set(base_cache_key, all_products, current_sql_offset, db_end_reached)
+        
+        # Slice and return
+        total_found = len(all_products)
+        page_products = all_products[offset:offset+limit]
+        has_more = (offset + limit) < total_found or (not db_end_reached)
+        
+        if not premium_user:
+            if len(page_products) > 4:
+                page_products = page_products[:4]
+                has_more = False
+            for product in page_products: product["is_locked"] = False
+        
+        result = {
+            "products": page_products, 
+            "next_offset": offset + limit if has_more else offset + len(page_products), 
+            "has_more": has_more, 
+            "is_premium": premium_user, 
+            "total_count": total_found if db_end_reached else total_found + 100
+        }
+        
+        print(f"[FEED] Complete. Found {total_found} products (scanned up to SQL offset {current_sql_offset}). Returning {len(page_products)} @ offset {offset}.")
+        return result
+    finally:
+        # Cleanup Singleflight event
+        if event:
+            event.set()
+            if PENDING_READS.get(base_cache_key) == event:
+                del PENDING_READS[base_cache_key]
 
-@app.get("/v1/user/status")
-async def get_user_status(user_id: str):
-    user = await get_user_by_id(user_id)
-    if not user: raise HTTPException(status_code=404, detail="User not found")
-    return {
-        "status": user.get("subscription_status"), 
-        "views_used": user.get("daily_free_alerts_viewed", 0), 
-        "views_limit": 4, 
-        "is_premium": user.get("subscription_status") == "active",
-        "email_verified": user.get("email_verified", False)
-    }
-
-
+# NOTE: Primary /v1/user/status endpoint is defined at line ~715 with full functionality
+# Duplicate endpoint removed to fix FastAPI duplicate operation ID warning
 
 @app.get("/v1/deals/saved")
 async def get_saved_deals(user_id: str = Query(...)):
@@ -1949,12 +2285,64 @@ async def update_notification_preferences(user_id: str, preferences: Dict[str, A
         if response.status_code not in [200, 204]:
             raise HTTPException(status_code=500, detail="Failed to update preferences")
         
+        # INVALIDATE CACHE
+        user_cache.invalidate(f"user_status:{user_id}")
+        
         print(f"[PUSH] Updated preferences for user {user_id}: {valid_preferences}")
         return {"success": True, "message": "Preferences updated", "preferences": valid_preferences}
     
     except Exception as e:
         print(f"[PUSH] Error updating preferences: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/v1/cache/invalidate")
+async def invalidate_cache(
+    user_id: Optional[str] = None,
+    cache_type: str = "all"  # "all", "feed", "user", "categories"
+):
+    """
+    Admin endpoint to manually invalidate cache
+    Use this when you know data has changed and want immediate refresh
+    """
+    try:
+        if cache_type == "all" or cache_type == "feed":
+            if user_id:
+                feed_cache.invalidate(f"feed:{user_id}")
+                product_list_cache.invalidate(f"feed_global")  # NEW: Clear product cache too
+                print(f"[CACHE] Invalidated feed cache for user {user_id}")
+            else:
+                feed_cache.invalidate()
+                product_list_cache.invalidate()  # NEW: Clear product cache too
+                print("[CACHE] Invalidated all feed caches")
+        
+        if cache_type == "all" or cache_type == "user":
+            if user_id:
+                user_cache.invalidate(f"user_status:{user_id}")
+                print(f"[CACHE] Invalidated user cache for {user_id}")
+            else:
+                user_cache.invalidate()
+                print("[CACHE] Invalidated all user caches")
+        
+        if cache_type == "all" or cache_type == "categories":
+            categories_cache.invalidate()
+            print("[CACHE] Invalidated categories cache")
+        
+        return {"success": True, "message": f"Cache invalidated: {cache_type}"}
+    except Exception as e:
+        print(f"[CACHE] Invalidation error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@app.get("/v1/cache/stats")
+async def get_cache_stats():
+    """Get cache statistics for monitoring"""
+    return {
+        "feed_cache": feed_cache.get_stats(),
+        "product_list_cache": product_list_cache.get_stats(),  # NEW
+        "user_cache": user_cache.get_stats(),
+        "categories_cache": categories_cache.get_stats()
+    }
 
 
 @app.get("/health")

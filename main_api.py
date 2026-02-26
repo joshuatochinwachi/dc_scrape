@@ -6,7 +6,8 @@ Performance optimized for mobile with connection pooling and async operations.
 """
 
 from fastapi import FastAPI, HTTPException, Depends, Query, Header, Body, BackgroundTasks
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import asyncio
@@ -202,12 +203,18 @@ async def create_user(email: str = None, apple_id: str = None) -> Optional[Dict]
 @db_retry(retries=2, backoff=2.0)
 async def update_user(user_id: str, data: Dict, return_details: bool = False) -> Any:
     data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    print(f"[DB] Updating user {user_id} with data: {data}")
     response = await http_client.patch(f"{URL}/rest/v1/users?id=eq.{user_id}", headers=HEADERS, json=data)
     success = response.status_code in [200, 201, 204]
+    
+    if success:
+        print(f"[DB] Update successful for {user_id}")
+    else:
+        print(f"[DB] Update failed for {user_id}: {response.status_code} {response.text}")
+    
     if not success and response.status_code >= 500:
         raise httpx.ReadTimeout(f"Server Error {response.status_code}: {response.text}")
-    if not success:
-        print(f"[DB] Update failed: {response.status_code} {response.text[:200]}")
+    
     if return_details:
         msg = "Success" if success else f"DB Error {response.status_code}: {response.text}"
         return success, msg
@@ -1640,9 +1647,7 @@ def extract_product(msg, channel_map):
     return {"id": str(msg.get("id")), "region": msg_region, "category_name": subcategory, "product_data": product_data, "created_at": msg.get("scraped_at"), "is_locked": False}
 
 
-@app.get("/")
-async def root():
-    return {"status": "online", "app": "hollowScan API", "v": "1.0.0"}
+# Root route handled by SPA dashboard below
 
 @app.get("/v1/categories")
 async def get_categories():
@@ -2345,9 +2350,192 @@ async def get_cache_stats():
     }
 
 
+# --- ADMIN MANAGEMENT ENDPOINTS ---
+
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "hollow_admin_secret_2024")
+
+async def verify_admin_key(x_admin_key: str = Header(None)):
+    if not x_admin_key or x_admin_key != ADMIN_API_KEY:
+        raise HTTPException(status_code=403, detail="Unauthorized admin access")
+    return True
+
+@app.get("/v1/admin/users")
+async def admin_get_users(
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=100),
+    search: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    admin_auth: bool = Depends(verify_admin_key)
+):
+    """Fetch all users with Telegram linking info and premium sources"""
+    offset = (page - 1) * limit
+    
+    # Base query for users
+    query = f"{URL}/rest/v1/users?select=*,user_telegram_links(*)"
+    
+    params = []
+    if search:
+        params.append(f"email=ilike.*{search}*")
+    if status:
+        params.append(f"subscription_status=eq.{status}")
+    
+    if params:
+        query += "&" + "&".join(params)
+    
+    query += f"&order=created_at.desc"
+    
+    # Get total count for pagination and set range
+    count_headers = {
+        **HEADERS, 
+        "Prefer": "count=exact",
+        "Range": f"{offset}-{offset + limit - 1}"
+    }
+    
+    try:
+        response = await http_client.get(query, headers=count_headers)
+        if response.status_code not in [200, 206]:
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        
+        users = response.json()
+        total_count = int(response.headers.get("Content-Range", "0-0/0").split("/")[-1])
+        
+        return {
+            "success": True,
+            "users": users,
+            "pagination": {
+                "total": total_count,
+                "page": page,
+                "limit": limit,
+                "pages": (total_count + limit - 1) // limit
+            }
+        }
+    except Exception as e:
+        print(f"[ADMIN] Error fetching users: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/v1/admin/user/subscription")
+async def admin_update_subscription(
+    background_tasks: BackgroundTasks,
+    data: Dict = Body(...),
+    admin_auth: bool = Depends(verify_admin_key)
+):
+    """Manually override user subscription status"""
+    user_id = data.get("user_id")
+    status = data.get("status") # 'active', 'free', 'expired'
+    end_date = data.get("end_date") # ISO string
+    source = data.get("source", "manual")
+    
+    if not user_id or not status:
+        raise HTTPException(status_code=400, detail="User ID and status are required")
+    
+    update_data = {
+        "subscription_status": status,
+        "subscription_end": end_date,
+        "subscription_source": source
+    }
+    
+    success = await update_user(user_id, update_data)
+    if success:
+        print(f"[ADMIN] Subscription updated for {user_id} -> {status}")
+        # Invalidate cache
+        background_tasks.add_task(user_cache.invalidate, f"user_status:{user_id}")
+        return {"success": True, "message": f"Subscription updated for user {user_id}"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to update subscription")
+
+@app.post("/v1/admin/user/status")
+async def admin_toggle_account_status(
+    background_tasks: BackgroundTasks,
+    data: Dict = Body(...),
+    admin_auth: bool = Depends(verify_admin_key)
+):
+    """Enable/Disable user account access (mocking a ban feature)"""
+    user_id = data.get("user_id")
+    is_active = data.get("is_active", True) # Boolean
+    
+    if not user_id:
+        raise HTTPException(status_code=400, detail="User ID is required")
+    
+    # If activating, default to 'free' if no other status provided
+    # If banning, set status to 'banned'
+    status = "free" if is_active else "banned"
+    print(f"[ADMIN] Toggling account status for {user_id} to {status} (is_active={is_active})")
+    
+    success = await update_user(user_id, {"subscription_status": status})
+    
+    # If we had a dedicated column, we'd use that. For now, let's assume we update a flag
+    # update_user(user_id, {"is_active": is_active})
+    
+    if success:
+        background_tasks.add_task(user_cache.invalidate, f"user_status:{user_id}")
+        return {"success": True, "message": f"User account status updated to {'Active' if is_active else 'Banned'}"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to update account status")
+
+@app.get("/v1/admin/analytics")
+async def admin_get_analytics(admin_auth: bool = Depends(verify_admin_key)):
+    """Get high-level analytics for the dashboard"""
+    try:
+        # 1. Total User Count
+        count_resp = await http_client.get(f"{URL}/rest/v1/users?select=id", headers={**HEADERS, "Prefer": "count=exact"})
+        total_users = int(count_resp.headers.get("Content-Range", "0-0/0").split("/")[-1])
+        
+        # 2. Subscription Distribution
+        sub_resp = await http_client.get(f"{URL}/rest/v1/users?select=subscription_status,subscription_source", headers=HEADERS)
+        users_data = sub_resp.json()
+        
+        distribution = defaultdict(int)
+        sources = defaultdict(int)
+        
+        for u in users_data:
+            status = u.get("subscription_status", "free")
+            source = u.get("subscription_source", "none") or "none"
+            distribution[status] += 1
+            if status == "active":
+                sources[source] += 1
+        
+        # 3. Last 24h Signups
+        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        recent_resp = await http_client.get(f"{URL}/rest/v1/users?created_at=gt.{yesterday}&select=id", headers={**HEADERS, "Prefer": "count=exact"})
+        new_users_24h = int(recent_resp.headers.get("Content-Range", "0-0/0").split("/")[-1])
+
+        return {
+            "success": True,
+            "analytics": {
+                "total_users": total_users,
+                "new_users_24h": new_users_24h,
+                "subscription_distribution": dict(distribution),
+                "premium_sources": dict(sources)
+            }
+        }
+    except Exception as e:
+        print(f"[ADMIN] Analytics error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+# --- STATIC FRONTEND SERVING (ADMIN DASHBOARD) ---
+
+# 1. Mount static assets (JS, CSS, Images)
+# Note: This MUST be after all API routes to avoid shadowing
+ADMIN_DIST_DIR = os.path.join(os.path.dirname(__file__), "admin_dashboard", "dist")
+
+if os.path.exists(ADMIN_DIST_DIR):
+    app.mount("/assets", StaticFiles(directory=os.path.join(ADMIN_DIST_DIR, "assets")), name="static")
+    print(f"[SERVER] Mounted Admin Dashboard assets from {ADMIN_DIST_DIR}")
+
+    @app.get("/")
+    @app.get("/{full_path:path}")
+    async def serve_dashboard(full_path: str = ""):
+        # Serve index.html for the root or any non-API route
+        index_path = os.path.join(ADMIN_DIST_DIR, "index.html")
+        if os.path.exists(index_path):
+            return FileResponse(index_path)
+        return {"error": "Dashboard build not found"}
+else:
+    print(f"[SERVER] Warning: Admin Dashboard dist folder not found at {ADMIN_DIST_DIR}")
 
 if __name__ == "__main__":
     import uvicorn
