@@ -95,7 +95,7 @@ HEADERS = {'apikey': KEY, 'Authorization': f'Bearer {KEY}', 'Content-Type': 'app
 SUPABASE_BUCKET = "monitor-data"
 
 # Global storage for push tokens (Move to DB irl)
-USER_PUSH_TOKENS = {} # {user_id: [tokens]}
+# Push notification state management
 LAST_PUSH_CHECK_TIME = datetime.now(timezone.utc)
 RECENT_ALERTS_LOG = [] # [(signature, timestamp)] to prevent duplicate spam
 
@@ -239,17 +239,8 @@ async def delete_user_by_email(email: str) -> bool:
     # 2. Cleanup verification codes
     await delete_verification_code_from_supabase(email)
 
-    # 3. Local Push Token Cleanup
-    if user_id in USER_PUSH_TOKENS:
-        del USER_PUSH_TOKENS[user_id]
-        try:
-            os.makedirs("data", exist_ok=True)
-            with open("data/push_tokens.json", "w") as f:
-                json.dump(USER_PUSH_TOKENS, f)
-            print(f"[AUTH] Cleaned up push tokens for deleted user {user_id}")
-        except: pass
 
-    # 4. Cache Invalidation
+    # 3. Cache Invalidation
     try:
         user_cache.invalidate(f"user_status:{user_id}")
         user_cache.invalidate(f"user_profile:{user_id}")
@@ -625,59 +616,6 @@ async def reset_password(data: Dict = Body(...)):
     
     return {"success": True, "message": "Password updated successfully! You can now log in."}
 
-
-@app.post("/v1/user/push-token")
-async def register_push_token(user_id: str = Query(...), token: str = Query(...)):
-    if not user_id or not token: raise HTTPException(status_code=400, detail="User ID and token are required")
-    
-    # 1. Update local cache/file (fallback)
-    if user_id not in USER_PUSH_TOKENS: USER_PUSH_TOKENS[user_id] = []
-    if token not in USER_PUSH_TOKENS[user_id]:
-        USER_PUSH_TOKENS[user_id].append(token)
-        try:
-            os.makedirs("data", exist_ok=True)
-            with open("data/push_tokens.json", "w") as f:
-                json.dump(USER_PUSH_TOKENS, f)
-        except: pass
-    
-    # 2. Update Supabase (Primary)
-    # Fetch current tokens first
-    user = await get_user_by_id(user_id)
-    if user:
-        current_tokens = user.get("push_tokens") or []
-        if not isinstance(current_tokens, list): current_tokens = []
-        if token not in current_tokens:
-            current_tokens.append(token)
-            await update_user(user_id, {"push_tokens": current_tokens})
-            print(f"[PUSH] Registered token for user {user_id} in DB")
-            
-    return {"success": True}
-
-@app.delete("/v1/user/push-token")
-async def unregister_push_token(user_id: str = Query(...), token: str = Query(...)):
-    """Unregister a push token for a user (on logout)"""
-    if not user_id or not token: raise HTTPException(status_code=400, detail="User ID and token are required")
-    
-    # 1. Update local cache
-    if user_id in USER_PUSH_TOKENS and token in USER_PUSH_TOKENS[user_id]:
-        USER_PUSH_TOKENS[user_id].remove(token)
-        try:
-            with open("data/push_tokens.json", "w") as f:
-                json.dump(USER_PUSH_TOKENS, f)
-        except: pass
-        print(f"[PUSH] Unregistered token for user {user_id} in local cache")
-
-    # 2. Update Supabase
-    user = await get_user_by_id(user_id)
-    if user:
-        current_tokens = user.get("push_tokens") or []
-        if not isinstance(current_tokens, list): current_tokens = []
-        if token in current_tokens:
-            current_tokens.remove(token)
-            await update_user(user_id, {"push_tokens": current_tokens})
-            print(f"[PUSH] Unregistered token for user {user_id} in DB")
-            
-    return {"success": True}
 
 @app.post("/v1/user/change-password")
 async def change_password(data: Dict = Body(...)):
