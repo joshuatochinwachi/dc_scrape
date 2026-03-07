@@ -10,6 +10,11 @@ import { SavedProvider } from './context/SavedContext';
 import { UserProvider, UserContext } from './context/UserContext';
 import Constants from './Constants';
 import { navigationRef } from './services/NavigationService';
+import {
+  setupNotificationHandler,
+  handleKilledAppNotification,
+  registerForPushNotifications
+} from './services/PushNotificationService';
 
 // Screens
 import HomeScreen from './screens/HomeScreen';
@@ -150,6 +155,24 @@ const NavigationRoot = ({ showSplash, setShowSplash, linking }) => {
       if (sub && sub.remove) sub.remove();
     };
   }, [user]); // Re-bind if user changes (so we have up-to-date user object)
+
+  // --- Push Notifications Setup ---
+  React.useEffect(() => {
+    // 1. Initialize listeners (foreground/background taps)
+    const cleanup = setupNotificationHandler();
+
+    // 2. Handle tap from KILLED state
+    handleKilledAppNotification();
+
+    return () => cleanup();
+  }, []);
+
+  // Register token when user logs in
+  React.useEffect(() => {
+    if (user && user.id) {
+      registerForPushNotifications(user.id);
+    }
+  }, [user?.id]);
 
   if (isLoading) {
     return (

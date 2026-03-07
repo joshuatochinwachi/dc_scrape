@@ -1276,27 +1276,18 @@ async def background_notification_worker():
                             
                             # Title: 🔥 Store - Region
                             final_title = f"🔥 {store_label} - {region_label}"
-
+                            
                             # Info: Profit or Discount
                             info_tag = ""
-                            if resell_val > price_val and price_val > 0:
-                                info_tag = f" • 💰 {currency}{resell_val - price_val:.2f} Profit"
-                            elif was_val > price_val and price_val > 0:
-                                discount_pct = int(((was_val - price_val) / was_val) * 100)
-                                info_tag = f" • -{discount_pct}%"
-
-                            # Body: Product Title • Price [Info] (only show price if it exists)
+                            if resell_val > price_val:
+                                info_tag = f" {currency}{resell_val - price_val:.2f} Profit"
+                            elif current_discount >= 5 and was_val > 0:
+                                info_tag = f" {current_discount}% OFF"
+                            
+                            # Body: Product Title • Price [Info]
+                            price_str = f"{currency}{p_data.get('price', '0.00')}"
                             truncated_title = title_raw[:60] + "..." if len(title_raw) > 60 else title_raw
-
-                            price_part = ""
-                            if price_val > 0:
-                                price_part = f" • {currency}{p_data.get('price')}"
-                            elif resell_val > 0:
-                                price_part = f" • Resell: {currency}{p_data.get('resell')}"
-                            elif was_val > 0:
-                                price_part = f" • Was: {currency}{p_data.get('was_price')}"
-
-                            final_body = f"{truncated_title}{price_part}{info_tag}"
+                            final_body = f"{truncated_title} • {price_str}{info_tag}"
                             
                             await send_expo_push_notification(list(set(target_tokens)), final_title, final_body, {"product_id": str(msg_id), "image": p_data.get("image")})
                             
