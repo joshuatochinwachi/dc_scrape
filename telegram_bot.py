@@ -3225,7 +3225,7 @@ async def remove_channel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def list_channels_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin: List all channels"""
-    if not is_admin(update.effective_user.id): 
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Admin only.")
         return
 
@@ -3234,20 +3234,28 @@ async def list_channels_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ℹ️ No channels configured.")
         return
 
-    text = "📺 <b>Configured Channels</b>\n\n"
-    current_cat = None
-    
-    # Sort by category then name
     sorted_chans = sorted(channels, key=lambda x: (x.get('category', 'Z'), x['name']))
-    
+
+    MAX_LEN = 3800  # headroom under Telegram's 4096 hard cap
+    chunks = ["📺 <b>Configured Channels</b>\n\n"]
+    current_cat = None
+
     for c in sorted_chans:
         cat = c.get('category', 'Uncategorized').replace("_", " ")
+        line = ""
         if cat != current_cat:
-            text += f"📂 <b>{cat}</b>\n"
+            line += f"📂 <b>{cat}</b>\n"
             current_cat = cat
-        text += f"• {c['name']} (<code>{c['id']}</code>)\n"
+        line += f"• {c['name']} (<code>{c['id']}</code>)\n"
 
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+        if len(chunks[-1]) + len(line) > MAX_LEN:
+            chunks.append("")
+            chunks[-1] += f"📂 <b>{cat}</b>\n"
+        chunks[-1] += line
+
+    for chunk in chunks:
+        if chunk.strip():
+            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
 
 async def broadcast_job(context: ContextTypes.DEFAULT_TYPE):
     """
