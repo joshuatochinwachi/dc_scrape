@@ -34,6 +34,7 @@ ADMIN_USER_ID = ADMIN_USER_IDS[0] if ADMIN_USER_IDS else None
 SUPABASE_BUCKET = "monitor-data"
 USERS_FILE = "bot_users.json"
 CODES_FILE = "active_codes.json"
+PROMO_CODES_FILE = "promo_codes.json"
 POLL_INTERVAL = 120
 MAX_JOB_RUNTIME = 110
 POTENTIAL_USERS_FILE = "potential_users.json"
@@ -595,13 +596,16 @@ class SubscriptionManager:
     def __init__(self):
         self.users: Dict[str, Dict] = {} 
         self.codes: Dict[str, int] = {}
+        self.promo_codes: Dict[str, Dict] = {}  # Multi-use promo codes
         self.potential_users: Dict[str, Dict] = {}
         self.lock = threading.Lock()
         self.remote_users_path = f"discord_josh/{USERS_FILE}"
         self.remote_codes_path = f"discord_josh/{CODES_FILE}"
+        self.remote_promo_path = f"discord_josh/{PROMO_CODES_FILE}"
         self.remote_potential_path = f"discord_josh/{POTENTIAL_USERS_FILE}"
         self.local_users_path = f"data/{USERS_FILE}"
         self.local_codes_path = f"data/{CODES_FILE}"
+        self.local_promo_path = f"data/{PROMO_CODES_FILE}"
         self.local_potential_path = f"data/{POTENTIAL_USERS_FILE}"
         
         # Persistence & Sync
@@ -660,6 +664,23 @@ class SubscriptionManager:
             try:
                 with open(self.local_codes_path, 'r') as f:
                     self.codes = json.load(f)
+            except: pass
+
+        # Load Promo Codes (multi-use)
+        promo_loaded = False
+        try:
+            data = supabase_utils.download_file(self.local_promo_path, self.remote_promo_path, SUPABASE_BUCKET)
+            if data:
+                self.promo_codes = json.loads(data)
+                promo_loaded = True
+                logger.info(f"✅ Loaded {len(self.promo_codes)} promo code(s) from Supabase")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to download promo codes from Supabase: {e}")
+
+        if not promo_loaded and os.path.exists(self.local_promo_path):
+            try:
+                with open(self.local_promo_path, 'r') as f:
+                    self.promo_codes = json.load(f)
             except: pass
 
         # Load Potential Users
@@ -762,6 +783,8 @@ class SubscriptionManager:
             supabase_utils.upload_file(self.local_users_path, SUPABASE_BUCKET, self.remote_users_path, debug=False)
             with open(self.local_codes_path, 'w') as f: json.dump(self.codes, f)
             supabase_utils.upload_file(self.local_codes_path, SUPABASE_BUCKET, self.remote_codes_path, debug=False)
+            with open(self.local_promo_path, 'w') as f: json.dump(self.promo_codes, f)
+            supabase_utils.upload_file(self.local_promo_path, SUPABASE_BUCKET, self.remote_promo_path, debug=False)
             with open(self.local_potential_path, 'w') as f: json.dump(self.potential_users, f)
             supabase_utils.upload_file(self.local_potential_path, SUPABASE_BUCKET, self.remote_potential_path, debug=False)
         except Exception as e:
@@ -774,6 +797,95 @@ class SubscriptionManager:
             self.codes[code] = days
             self._sync_state()
         return code
+
+    # --- Multi-Use Promo Code Methods ---
+
+    def generate_promo_code(self, days: int, custom_code: str = None, creator_id: str = None) -> str:
+        """Generate a multi-use promo code redeemable by unlimited users (each user once)."""
+        import secrets
+        code = custom_code.upper().strip() if custom_code else secrets.token_hex(5).upper()
+        with self.lock:
+            self.promo_codes[code] = {
+                "days": days,
+                "created_at": datetime.utcnow().isoformat(),
+                "created_by": str(creator_id) if creator_id else "admin",
+                "redeemed_users": [],
+                "is_active": True
+            }
+            self._sync_state()
+        return code
+
+    def redeem_promo_code(self, user_id: str, username: str, code: str):
+        """Redeem a multi-use promo code. Returns (status, days, new_expiry).
+        status is one of: 'SUCCESS', 'ALREADY_REDEEMED', 'INACTIVE', 'NOT_FOUND'.
+        """
+        with self.lock:
+            uid = str(user_id)
+            if code not in self.promo_codes:
+                return ("NOT_FOUND", 0, None)
+
+            promo = self.promo_codes[code]
+
+            if not promo.get("is_active", True):
+                return ("INACTIVE", 0, None)
+
+            if uid in promo["redeemed_users"]:
+                return ("ALREADY_REDEEMED", promo["days"], None)
+
+            days = promo["days"]
+
+            # Extend from current expiry if still active, else start fresh
+            current_expiry = datetime.utcnow()
+            if uid in self.users:
+                try:
+                    old_expiry = parse_iso_datetime(self.users[uid].get("expiry", ""))
+                    if old_expiry > datetime.utcnow():
+                        current_expiry = old_expiry
+                except: pass
+
+            new_expiry = current_expiry + timedelta(days=days)
+
+            # Update user record
+            user_data = self.users.get(uid, {})
+            user_data["expiry"] = new_expiry.isoformat()
+            user_data["username"] = username or user_data.get("username", "Unknown")
+            if "alerts_paused" not in user_data:
+                user_data["alerts_paused"] = False
+            if "joined_at" not in user_data:
+                user_data["joined_at"] = datetime.utcnow().isoformat()
+            self.users[uid] = user_data
+
+            # Remove from potential users if present
+            if uid in self.potential_users:
+                self.potential_users.pop(uid)
+
+            # Mark code as used by this user
+            self.promo_codes[code]["redeemed_users"].append(uid)
+
+            self._sync_state()
+
+        # Sync premium to mobile app (outside lock to avoid blocking)
+        try:
+            if hasattr(supabase_utils, 'sync_telegram_premium_to_app'):
+                supabase_utils.sync_telegram_premium_to_app(uid, new_expiry.isoformat())
+                logger.info(f"🔄 Synced promo premium for {uid} to Supabase SQL")
+        except Exception as se:
+            logger.warning(f"⚠️ Failed to sync promo premium to Supabase: {se}")
+
+        return ("SUCCESS", days, new_expiry)
+
+    def get_all_promos(self) -> Dict[str, Dict]:
+        """Return copy of all promo codes."""
+        return dict(self.promo_codes)
+
+    def revoke_promo_code(self, code: str) -> bool:
+        """Deactivate a promo code without deleting it (preserves redemption history)."""
+        with self.lock:
+            if code not in self.promo_codes:
+                return False
+            self.promo_codes[code]["is_active"] = False
+            self._sync_state()
+        return True
 
     def redeem_code(self, user_id: str, username: str, code: str) -> bool:
         with self.lock:
@@ -3095,17 +3207,26 @@ Contact your administrator!
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle code redemption"""
+    """Handle code redemption — supports both single-use and multi-use promo codes."""
     user_id = str(update.effective_user.id)
     username = update.effective_user.username or update.effective_user.first_name
     text = update.message.text.strip().upper()
-    
-    code = text.replace("-", "").replace(" ", "")
-    
-    if len(code) >= 8 and len(code) <= 16:
-        if sm.redeem_code(user_id, username, code):
-            stats = sm.get_user_stats(user_id)
-            response = f"""
+
+    # Strip hyphens/spaces for single-use codes; for promo codes keep underscores
+    code_clean = text.replace("-", "").replace(" ", "")
+
+    # Minimum length gate (promo codes can be longer than single-use ones)
+    if len(code_clean) < 4:
+        await update.message.reply_text(
+            "💡 Send a subscription code or use /start for the menu.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    # 1. Try single-use code first (8–16 chars, hex format)
+    if 8 <= len(code_clean) <= 16 and sm.redeem_code(user_id, username, code_clean):
+        stats = sm.get_user_stats(user_id)
+        response = f"""
 🎉 <b>Code Redeemed Successfully!</b>
 
 ✅ Subscription Active
@@ -3115,17 +3236,52 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 You'll now receive professional alerts!
 Use /start for the menu.
 """
-            await update.message.reply_text(response, parse_mode=ParseMode.HTML)
-        else:
+        await update.message.reply_text(response, parse_mode=ParseMode.HTML)
+        return
+
+    # 2. Try multi-use promo code (check original stripped text to preserve underscores)
+    promo_code = text.replace(" ", "")  # keep underscores/hyphens intact
+    status, days, new_expiry = sm.redeem_promo_code(user_id, username, promo_code)
+
+    if status == "SUCCESS":
+        stats = sm.get_user_stats(user_id)
+        response = f"""
+🎉 <b>Promo Code Redeemed!</b>
+
+✅ Subscription Active
+⏰ Expires: {stats['expiry_date']}
+⏳ Days: {stats['days_remaining']}
+
+You'll now receive professional alerts!
+Use /start for the menu.
+"""
+        await update.message.reply_text(response, parse_mode=ParseMode.HTML)
+
+    elif status == "ALREADY_REDEEMED":
+        await update.message.reply_text(
+            f"⚠️ <b>Already Redeemed</b>\n\nYou've already used promo code <code>{promo_code}</code>.\n"
+            "Each user can only redeem a promo code once.",
+            parse_mode=ParseMode.HTML
+        )
+
+    elif status == "INACTIVE":
+        await update.message.reply_text(
+            "🚫 <b>Promo Expired</b>\n\nThis promo code is no longer active. Contact the admin for a valid code.",
+            parse_mode=ParseMode.HTML
+        )
+
+    else:
+        # NOT_FOUND — not a promo code either, could be a typo or random message
+        if len(code_clean) >= 8:
             await update.message.reply_text(
                 "❌ <b>Invalid Code</b>\n\nCheck your code and try again.",
                 parse_mode=ParseMode.HTML
             )
-    else:
-        await update.message.reply_text(
-            "💡 Send a subscription code or use /start for the menu.",
-            parse_mode=ParseMode.HTML
-        )
+        else:
+            await update.message.reply_text(
+                "💡 Send a subscription code or use /start for the menu.",
+                parse_mode=ParseMode.HTML
+            )
 
 
 async def gen_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3143,6 +3299,114 @@ async def gen_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except:
         await update.message.reply_text("Usage: /gen <days>")
+
+
+async def gen_promo_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: Generate a multi-use promo code redeemable by unlimited users.
+    Usage: /gen_promo <days> [CUSTOM_CODE]
+    Example: /gen_promo 100 HOLLOWPROMO2026
+    """
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Admin only.")
+        return
+
+    if not context.args or len(context.args) < 1:
+        await update.message.reply_text(
+            "❌ <b>Usage:</b> <code>/gen_promo &lt;days&gt; [CODE]</code>\n\n"
+            "Examples:\n"
+            "• <code>/gen_promo 100</code> — auto-generate a promo code\n"
+            "• <code>/gen_promo 100 HOLLOWPROMO2026</code> — use a custom code\n\n"
+            "<i>Promo codes can be redeemed by unlimited users (each user once).</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    try:
+        days = int(context.args[0])
+        if days <= 0:
+            raise ValueError("Days must be positive")
+    except ValueError:
+        await update.message.reply_text("❌ <code>days</code> must be a positive number.", parse_mode=ParseMode.HTML)
+        return
+
+    custom_code = context.args[1].upper().strip() if len(context.args) >= 2 else None
+
+    # Validate custom code: alphanumeric only, 4–32 chars
+    if custom_code:
+        import re as _re
+        if not _re.match(r'^[A-Z0-9_\-]{4,32}$', custom_code):
+            await update.message.reply_text(
+                "❌ Custom code must be 4–32 alphanumeric characters (letters, numbers, underscores, hyphens only)."
+            )
+            return
+        if custom_code in sm.promo_codes:
+            await update.message.reply_text(
+                f"❌ Promo code <code>{custom_code}</code> already exists. Use /revoke_promo to disable it first.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+
+    creator_id = str(update.effective_user.id)
+    code = sm.generate_promo_code(days, custom_code=custom_code, creator_id=creator_id)
+
+    await update.message.reply_text(
+        f"🎟️ <b>Promo Code Created!</b>\n\n"
+        f"Code: <code>{code}</code>\n"
+        f"Duration: <b>{days} days</b> per user\n"
+        f"Usage: <b>Unlimited</b> (each user can redeem once)\n\n"
+        f"<i>Share this code with your users. They can type it in the bot to redeem.</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+
+async def list_promos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: List all promo codes with redemption counts."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Admin only.")
+        return
+
+    promos = sm.get_all_promos()
+    if not promos:
+        await update.message.reply_text("📭 No promo codes exist yet. Use /gen_promo to create one.")
+        return
+
+    lines = ["🎟️ <b>All Promo Codes</b>\n"]
+    for code, info in promos.items():
+        status = "✅ Active" if info.get("is_active", True) else "🚫 Revoked"
+        count = len(info.get("redeemed_users", []))
+        days = info.get("days", "?")
+        created = info.get("created_at", "")[:10]
+        lines.append(
+            f"• <code>{code}</code> — {days}d — {status}\n"
+            f"  👥 Redeemed by {count} user(s) | Created: {created}"
+        )
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+async def revoke_promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: Deactivate a promo code.
+    Usage: /revoke_promo <CODE>
+    """
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Admin only.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /revoke_promo <CODE>", parse_mode=ParseMode.HTML)
+        return
+
+    code = context.args[0].upper().strip()
+    if sm.revoke_promo_code(code):
+        await update.message.reply_text(
+            f"🚫 Promo code <code>{code}</code> has been deactivated. Existing redemptions are unaffected.",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        await update.message.reply_text(
+            f"❌ Promo code <code>{code}</code> not found.",
+            parse_mode=ParseMode.HTML
+        )
 
 async def add_bot_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Superadmin: Add a new admin"""
@@ -4076,7 +4340,10 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /unpin_all - Clear all pinned messages
 
 <b>Admin Tools:</b>
-/gen [days] - Generate subscription code
+/gen [days] - Generate single-use subscription code
+/gen_promo [days] [CODE] - Generate multi-use promo code
+/promos - List all promo codes
+/revoke_promo [CODE] - Deactivate a promo code
 /test [count] - Test recent alerts
 
 <b>Channel Management:</b>
@@ -4101,7 +4368,10 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /unpin_all - Clear all pinned messages
 
 <b>Admin Tools:</b>
-/gen [days] - Generate subscription code
+/gen [days] - Generate single-use subscription code
+/gen_promo [days] [CODE] - Generate multi-use promo code
+/promos - List all promo codes
+/revoke_promo [CODE] - Deactivate a promo code
 /test [count] - Test recent alerts
 
 <b>Channel Management:</b>
@@ -4223,6 +4493,9 @@ def run_bot():
             app.add_handler(CommandHandler("link", handle_link))
             app.add_handler(CommandHandler("unlink", handle_unlink))
             app.add_handler(CommandHandler("gen", gen_code))
+            app.add_handler(CommandHandler("gen_promo", gen_promo_code))
+            app.add_handler(CommandHandler("promos", list_promos))
+            app.add_handler(CommandHandler("revoke_promo", revoke_promo))
             app.add_handler(CommandHandler("add_admin", add_bot_admin))
             app.add_handler(CommandHandler("remove_admin", remove_bot_admin))
             app.add_handler(CommandHandler("test", test_alerts))

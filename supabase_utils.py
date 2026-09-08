@@ -499,6 +499,7 @@ def link_app_user_to_telegram(user_id: str, telegram_id: str, telegram_username:
                 timeout=10
             )
             if debug: print(f"✅ Synced premium for {user_id}: {patch_resp.status_code}")
+            invalidate_backend_cache(user_id, key=key, debug=debug)
 
         if debug: print(f"✅ Linked {user_id} <-> {telegram_id}")
         return {"success": True, "message": "Successfully linked!"}
@@ -507,10 +508,40 @@ def link_app_user_to_telegram(user_id: str, telegram_id: str, telegram_username:
         if debug: print(f"❌ Link Exception: {e}")
         return {"success": False, "message": str(e)}
 
+def invalidate_backend_cache(user_id: str, key: str = None, debug: bool = True):
+    """
+    Bust the FastAPI backend user_cache so the mobile app sees status changes immediately.
+    Non-blocking / non-fatal: if BACKEND_URL is missing or fails, cache naturally expires in 60s.
+    """
+    try:
+        backend_url = os.getenv("BACKEND_URL", "").rstrip("/")
+        if not backend_url:
+            if debug: print("ℹ️ BACKEND_URL not set — skipping cache invalidation (cache will expire naturally)")
+            return
+        if not key:
+            _, key = get_supabase_config()
+        invalidate_resp = requests.post(
+            f"{backend_url}/v1/internal/cache-invalidate",
+            headers={
+                "Content-Type": "application/json",
+                "X-Internal-Key": key  # Shared secret: the Supabase key
+            },
+            json={"user_id": user_id},
+            timeout=5
+        )
+        if debug:
+            if invalidate_resp.status_code == 200:
+                print(f"✅ Backend cache busted for App User {user_id}")
+            else:
+                print(f"⚠️ Cache bust returned {invalidate_resp.status_code}: {invalidate_resp.text[:100]}")
+    except Exception as ce:
+        if debug: print(f"⚠️ Cache invalidation failed (non-fatal): {ce}")
+
 def sync_telegram_premium_to_app(telegram_id: str, expiry_iso: str, debug: bool = True) -> bool:
     """
     Find the linked app user for a telegram ID and update their premium status.
-    Called by the Telegram bot after a successful Stripe payment.
+    Called by the Telegram bot after a successful code redemption (single-use or promo).
+    Also invalidates the backend user_cache so the mobile app sees the update immediately.
     """
     url, key = get_supabase_config()
     headers = {
@@ -545,7 +576,9 @@ def sync_telegram_premium_to_app(telegram_id: str, expiry_iso: str, debug: bool 
                     timeout=10
                 )
                 if patch_resp.status_code in [200, 204]:
-                    if debug: print(f"✅ Synced Stripe premium for Telegram {telegram_id} to App User {user_id}")
+                    if debug: print(f"✅ Synced premium for Telegram {telegram_id} to App User {user_id}")
+                    # 3. Bust the backend user_cache so the mobile app sees the update immediately
+                    invalidate_backend_cache(user_id, key=key, debug=debug)
                     return True
                 else:
                     if debug: print(f"❌ Failed to update app user {user_id}: {patch_resp.text}")

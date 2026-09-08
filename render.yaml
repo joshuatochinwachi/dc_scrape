@@ -23,6 +23,8 @@ services:
         sync: false
       - key: TELEGRAM_ADMIN_ID
         sync: false
+      - key: BACKEND_URL
+        sync: false  # Set to your FastAPI backend URL, e.g. https://your-backend.onrender.com
       - key: HEADLESS
         value: "true"
       # Performance tuning for Playwright in cloud
