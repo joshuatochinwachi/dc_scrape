@@ -3902,7 +3902,10 @@ DEFAULT_COMMANDS = [
 ADMIN_COMMANDS = [
     BotCommand("start", "Start the bot and see main menu"),
     BotCommand("help", "Show available commands"),
-    BotCommand("gen", "Generate subscription code (e.g., /gen 30)"),
+    BotCommand("gen", "Generate single-use code (e.g., /gen 30)"),
+    BotCommand("gen_promo", "Generate multi-use promo code (e.g., /gen_promo 100 CODE)"),
+    BotCommand("promos", "List all promo codes and usage stats"),
+    BotCommand("revoke_promo", "Deactivate a promo code (e.g., /revoke_promo CODE)"),
     BotCommand("test", "Test recent alerts (e.g., /test 5)"),
     BotCommand("add_channel", "Add scraper channel"),
     BotCommand("remove_channel", "Remove scraper channel"),
@@ -3913,7 +3916,10 @@ ADMIN_COMMANDS = [
 SUPERADMIN_COMMANDS = [
     BotCommand("start", "Start the bot and see main menu"),
     BotCommand("help", "Show available commands"),
-    BotCommand("gen", "Generate subscription code (e.g., /gen 30)"),
+    BotCommand("gen", "Generate single-use code (e.g., /gen 30)"),
+    BotCommand("gen_promo", "Generate multi-use promo code (e.g., /gen_promo 100 CODE)"),
+    BotCommand("promos", "List all promo codes and usage stats"),
+    BotCommand("revoke_promo", "Deactivate a promo code (e.g., /revoke_promo CODE)"),
     BotCommand("test", "Test recent alerts (e.g., /test 5)"),
     BotCommand("add_admin", "Add a user as admin (e.g., /add_admin 123456)"),
     BotCommand("remove_admin", "Remove admin status (e.g., /remove_admin 123456)"),
