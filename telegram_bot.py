@@ -359,6 +359,20 @@ def fetch_product_images(url: str, max_images: int = 3) -> List[str]:
         'login', 'cart', 'checkout', 'account', 'signin'
     ])
     
+    # Unwrap redirect/wrapper URLs (e.g., zephr.app redirect links)
+    if "u=" in url or "url=" in url:
+        try:
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(url)
+            qs = parse_qs(parsed.query)
+            target = qs.get('u', [None])[0] or qs.get('url', [None])[0]
+            if target:
+                if not target.startswith('http'):
+                    target = 'https://' + target.lstrip('/')
+                url = target
+        except Exception:
+            pass
+
     if skip_scrape:
         logger.debug(f"   ⏭️ Skipping scrape of non-product page")
         return []
@@ -2317,11 +2331,68 @@ def format_telegram_message(msg_data: Dict) -> Tuple[str, Optional[str], Optiona
         if row:
             keyboard.append(row)
     
-    # Add custom buttons if any
-    if custom_buttons:
-        keyboard.extend(custom_buttons)
-    
+    # Auto-sync resolved high-res image back to Supabase so Mobile App feed matches TG bot
+    if image_url and msg_data.get("id"):
+        sync_resolved_image_to_supabase(msg_data.get("id"), image_url, raw)
+
     return text, image_url, InlineKeyboardMarkup(keyboard) if keyboard else None, image_bytes
+
+
+def sync_resolved_image_to_supabase(msg_id: Any, image_url: str, raw_data: Dict):
+    """
+    Surgically sync resolved high-res image back to discord_messages in Supabase
+    so the Mobile App / backend feed displays the exact same image as Telegram bot.
+    Runs non-blocking in a background thread.
+    """
+    if not msg_id or not image_url or not isinstance(image_url, str):
+        return
+    if not (image_url.startswith("http://") or image_url.startswith("https://")) or image_url.startswith("data:image"):
+        return
+    if any(bad in image_url.lower() for bad in ["placeholder", "noimage", "no-image", "notfound", "comingsoon", "unavailable"]):
+        return
+
+    def _do_patch():
+        try:
+            import copy
+            updated_raw = copy.deepcopy(raw_data) if raw_data else {}
+            if "embed" not in updated_raw or not isinstance(updated_raw["embed"], dict):
+                updated_raw["embed"] = {}
+            embed = updated_raw["embed"]
+
+            curr_images = embed.get("images") or []
+            if curr_images and isinstance(curr_images, list) and curr_images[0] == image_url:
+                return  # Already up to date
+
+            embed["images"] = [image_url]
+            embed["image"] = {"url": image_url}
+            embed["thumbnail"] = {"url": image_url}
+            updated_raw["product_image"] = image_url
+
+            sb_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+            sb_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY", "")
+            if not sb_url or not sb_key:
+                return
+
+            patch_headers = {
+                "apikey": sb_key,
+                "Authorization": f"Bearer {sb_key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal"
+            }
+            res = requests.patch(
+                f"{sb_url}/rest/v1/discord_messages?id=eq.{msg_id}",
+                headers=patch_headers,
+                json={"raw_data": updated_raw},
+                timeout=10
+            )
+            if res.status_code in [200, 204]:
+                logger.info(f"   📸 💾 Auto-synced image to Supabase for msg {msg_id}: {image_url[:60]}")
+            else:
+                logger.debug(f"   ⚠️ Image sync returned status {res.status_code}")
+        except Exception as err:
+            logger.debug(f"   ⚠️ Image sync exception: {err}")
+
+    threading.Thread(target=_do_patch, daemon=True).start()
 
 
 

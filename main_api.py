@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-app.py - OPTIMIZED
-Professional FastAPI backend for hollowScan Mobile App.
-Performance optimized for mobile with connection pooling and async operations.
+This is just a backup version
+The main FastAPI backend of HollowScan mobile app is 
+at https://github.com/joshuatochinwachi/HollowScan-Fast-API-Backend/blob/main/app.py
+
 """
 
 from fastapi import FastAPI, HTTPException, Depends, Query, Header, Body, BackgroundTasks
@@ -142,6 +143,101 @@ def optimize_image_url(url: str) -> str:
         if "discordapp.net" in url and "?" in url: url = url.split("?")[0]
     except: pass
     return url
+
+
+def is_valid_product_image(url: Optional[str]) -> bool:
+    """Check if an image URL is a valid, high-quality, loadable image for the app."""
+    if not url or not isinstance(url, str):
+        return False
+    u = url.strip()
+    if not (u.startswith("http://") or u.startswith("https://")):
+        return False
+    if u.startswith("data:image"):
+        return False
+    u_low = u.lower()
+    for bad in ["placeholder", "noimage", "no-image", "notfound", "comingsoon", "coming-soon", "unavailable", "no-photo", "image-not-available"]:
+        if bad in u_low:
+            return False
+    return True
+
+
+RESOLVED_IMAGE_CACHE = {}
+
+
+def scrape_og_image_regex(html_text: str) -> Optional[str]:
+    """Extract product image from HTML without external dependencies."""
+    if not html_text or not isinstance(html_text, str):
+        return None
+    # 1. OpenGraph / Twitter Image meta tags
+    m = re.search(r'<meta[^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\'][^>]+content=["\']([^"\']+)["\']', html_text, re.IGNORECASE)
+    if not m:
+        m = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\']', html_text, re.IGNORECASE)
+    if m:
+        u = m.group(1).strip()
+        if u.startswith('//'): u = 'https:' + u
+        if is_valid_product_image(u): return u
+    # 2. JSON-LD "image" field
+    m_json = re.search(r'"image"\s*:\s*["\'](https?://[^"\']+)["\']', html_text, re.IGNORECASE)
+    if m_json:
+        u = m_json.group(1).strip()
+        if is_valid_product_image(u): return u
+    return None
+
+
+async def async_enrich_product_image(msg_id: str, candidate_urls: list):
+    """Background worker: tries candidate URLs in order, scrapes og:image, patches Supabase."""
+    if not candidate_urls or not msg_id:
+        return
+    skip_patterns = ['keepa.com', 'ebay.com/sch', 'login', 'cart', 'checkout', 'bugs.zephr', '/member/']
+    for buy_url in candidate_urls:
+        if not buy_url or not isinstance(buy_url, str) or not buy_url.startswith("http"):
+            continue
+        if any(x in buy_url.lower() for x in skip_patterns):
+            continue
+        try:
+            clean_url = buy_url
+            if "u=" in clean_url or "url=" in clean_url:
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(clean_url)
+                qs = parse_qs(parsed.query)
+                target = qs.get('u', [None])[0] or qs.get('url', [None])[0]
+                if target:
+                    if not target.startswith('http'): target = 'https://' + target.lstrip('/')
+                    clean_url = target
+            if any(x in clean_url.lower() for x in skip_patterns):
+                continue
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            }
+            resp = await http_client.get(clean_url, headers=headers, timeout=8.0, follow_redirects=True)
+            if resp.status_code == 200:
+                found_img = scrape_og_image_regex(resp.text)
+                if found_img and is_valid_product_image(found_img):
+                    found_img = optimize_image_url(found_img)
+                    RESOLVED_IMAGE_CACHE[buy_url] = found_img
+                    RESOLVED_IMAGE_CACHE[clean_url] = found_img
+                    get_res = await http_client.get(f"{URL}/rest/v1/discord_messages?id=eq.{msg_id}&select=raw_data", headers=HEADERS)
+                    if get_res.status_code == 200 and get_res.json():
+                        raw_d = get_res.json()[0].get("raw_data") or {}
+                        if "embed" not in raw_d or not isinstance(raw_d["embed"], dict):
+                            raw_d["embed"] = {}
+                        raw_d["embed"]["images"] = [found_img]
+                        raw_d["embed"]["image"] = {"url": found_img}
+                        raw_d["embed"]["thumbnail"] = {"url": found_img}
+                        raw_d["product_image"] = found_img
+                        await http_client.patch(
+                            f"{URL}/rest/v1/discord_messages?id=eq.{msg_id}",
+                            headers=HEADERS,
+                            json={"raw_data": raw_d}
+                        )
+                        print(f"[IMAGE ENRICH] OK Patched {msg_id} with scraped image from {clean_url[:50]}: {found_img[:60]}")
+                    return  # Success — stop trying further URLs
+        except Exception as e:
+            print(f"[IMAGE ENRICH] Failed for {msg_id} / {buy_url[:50]}: {e}")
+            continue
+
+
 
 def db_retry(retries: int = 5, backoff: float = 1.0):
     """Decorator to retry DB operations on timeout or transient errors"""
@@ -1477,23 +1573,75 @@ def extract_product(msg, channel_map):
         description = re.sub(r'\[([^\]]+)\]\((https?://[^\)]+)\)', r'\1', description)
 
     image = None
-    if embed.get("images"): image = optimize_image_url(embed["images"][0])
-    elif embed.get("image") and isinstance(embed["image"], dict): image = optimize_image_url(embed["image"].get("url"))
-    elif embed.get("thumbnail") and isinstance(embed["thumbnail"], dict): image = optimize_image_url(embed["thumbnail"].get("url"))
+    # 1. Check all images in embed["images"]
+    if embed.get("images") and isinstance(embed["images"], list):
+        for img_c in embed["images"]:
+            opt = optimize_image_url(img_c)
+            if is_valid_product_image(opt):
+                image = opt
+                break
 
+    # 2. Check embed["image"] (dict or string)
+    if not image and embed.get("image"):
+        img_val = embed["image"].get("url") if isinstance(embed["image"], dict) else embed["image"]
+        opt = optimize_image_url(img_val)
+        if is_valid_product_image(opt):
+            image = opt
+
+    # 3. Check embed["thumbnail"] (dict or string)
+    if not image and embed.get("thumbnail"):
+        thumb_val = embed["thumbnail"].get("url") if isinstance(embed["thumbnail"], dict) else embed["thumbnail"]
+        opt = optimize_image_url(thumb_val)
+        if is_valid_product_image(opt):
+            image = opt
+
+    # 4. Check extra embeds
     if not image and embeds:
         for extra_embed in embeds:
-            if extra_embed.get("images"): image = optimize_image_url(extra_embed["images"][0]); break
-            elif extra_embed.get("image") and isinstance(extra_embed["image"], dict): image = optimize_image_url(extra_embed["image"].get("url")); break
-            elif extra_embed.get("thumbnail") and isinstance(extra_embed["thumbnail"], dict): image = optimize_image_url(extra_embed["thumbnail"].get("url")); break
+            for img_c in (extra_embed.get("images") or []):
+                opt = optimize_image_url(img_c)
+                if is_valid_product_image(opt):
+                    image = opt
+                    break
+            if image: break
+            if extra_embed.get("image"):
+                opt = optimize_image_url(extra_embed["image"].get("url") if isinstance(extra_embed["image"], dict) else extra_embed["image"])
+                if is_valid_product_image(opt):
+                    image = opt
+                    break
+            if extra_embed.get("thumbnail"):
+                opt = optimize_image_url(extra_embed["thumbnail"].get("url") if isinstance(extra_embed["thumbnail"], dict) else extra_embed["thumbnail"])
+                if is_valid_product_image(opt):
+                    image = opt
+                    break
 
+    # 5. Check direct raw keys (e.g. product_image, resolved_image_url)
+    if not image:
+        for k in ["product_image", "resolved_image_url", "image_url"]:
+            if raw.get(k) and is_valid_product_image(raw[k]):
+                image = optimize_image_url(raw[k])
+                break
+
+    # 6. Check attachments
     if not image and raw.get("attachments"):
         for att in raw["attachments"]:
-            if any(att.get("filename", "").lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp']): image = att.get("url"); break
+            att_url = att.get("url")
+            if att_url and is_valid_product_image(att_url):
+                if any(att.get("filename", "").lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp']):
+                    image = att_url
+                    break
 
+    # 7. Check message content for image links
     if not image and msg.get("content"):
         img_match = re.search(r'(https?://[^\s]+(?:\.png|\.jpg|\.jpeg|\.webp))', msg["content"], re.IGNORECASE)
-        if img_match: image = img_match.group(1)
+        if img_match and is_valid_product_image(img_match.group(1)):
+            image = img_match.group(1)
+
+    # 8. Check background resolved cache
+    if not image:
+        msg_id_str = str(msg.get("id"))
+        if msg_id_str in RESOLVED_IMAGE_CACHE:
+            image = RESOLVED_IMAGE_CACHE[msg_id_str]
 
     price, resell, roi, was_price = None, None, None, None
     details = []
@@ -1587,9 +1735,11 @@ def extract_product(msg, channel_map):
              link_match = re.search(r'\[([^\]]+)\]\((https?://[^\)]+)\)', field.get("value", ""))
              if link_match: primary_buy_url = link_match.group(2); break
 
+    clean_image = image if is_valid_product_image(image) else None
     product_data = {
         "title": title[:100], "description": description[:500],
-        "image": image or "https://via.placeholder.com/400",
+        "image": clean_image or "https://via.placeholder.com/400",
+        "thumbnail": clean_image,
         "price": price, "was_price": was_price, "resell": resell, "roi": roi,
         "buy_url": primary_buy_url or (all_links[0].get('url') if all_links else None),
         "links": categorized_links, "details": details
@@ -1857,6 +2007,22 @@ async def get_feed(
                     except: has_any_price = False
                     
                     if not (has_image or has_any_price or has_links): continue
+                    
+                    # Background: scrape image from product page if missing
+                    if not has_image:
+                        msg_id_str = str(msg.get("id"))
+                        if msg_id_str not in RESOLVED_IMAGE_CACHE:
+                            raw_for_enrich = msg.get("raw_data", {})
+                            embed_for_enrich = raw_for_enrich.get("embed") or (raw_for_enrich.get("embeds") or [{}])[0]
+                            candidate_urls = []
+                            if embed_for_enrich.get("title_url"): candidate_urls.append(embed_for_enrich["title_url"])
+                            if p_data.get("buy_url"): candidate_urls.append(p_data["buy_url"])
+                            for link_cat in p_data.get("links", {}).values():
+                                for lnk in (link_cat or []):
+                                    u = lnk.get("url") if isinstance(lnk, dict) else lnk
+                                    if u and u not in candidate_urls: candidate_urls.append(u)
+                            if candidate_urls:
+                                background_tasks.add_task(async_enrich_product_image, msg_id_str, candidate_urls)
                     
                     if search_is_active:
                         search_keywords = [k.lower().strip() for k in search.split() if k.strip()]
@@ -2558,6 +2724,58 @@ async def verify_google_play_purchase(background_tasks: BackgroundTasks, data: D
         "subscription_end": expiry_iso,
         "message": "Premium status activated!"
     }
+
+
+@app.get("/v1/admin/enrich-images")
+async def admin_enrich_images(
+    limit: int = Query(50, ge=1, le=200),
+    key: Optional[str] = Query(None),
+    x_admin_key: Optional[str] = Header(None, alias="x-admin-key")
+):
+    admin_token = x_admin_key or key
+    if not admin_token or admin_token.strip() != ADMIN_API_KEY:
+        raise HTTPException(status_code=403, detail="Unauthorized admin access")
+
+    query = f"{URL}/rest/v1/discord_messages?select=id,raw_data,scraped_at&order=scraped_at.desc&limit={limit}"
+    resp = await http_client.get(query, headers=HEADERS)
+    if resp.status_code != 200:
+        raise HTTPException(status_code=500, detail="Failed to fetch messages")
+
+    messages = resp.json() or []
+    enriched = []
+    for msg in messages:
+        msg_id = str(msg.get("id"))
+        raw = msg.get("raw_data") or {}
+        embed = raw.get("embed") or (raw.get("embeds") or [{}])[0]
+        existing = None
+        if embed.get("images") and isinstance(embed["images"], list) and len(embed["images"]) > 0:
+            existing = embed["images"][0]
+        elif embed.get("thumbnail"):
+            existing = embed["thumbnail"] if isinstance(embed["thumbnail"], str) else embed["thumbnail"].get("url")
+        elif raw.get("product_image"):
+            existing = raw["product_image"]
+
+        if is_valid_product_image(existing):
+            continue
+
+        candidate_urls = []
+        if embed.get("title_url"): candidate_urls.append(embed["title_url"])
+        for link in embed.get("links", []):
+            u = link.get("url") if isinstance(link, dict) else link
+            if u and u.startswith("http") and u not in candidate_urls:
+                candidate_urls.append(u)
+
+        if candidate_urls:
+            await async_enrich_product_image(msg_id, candidate_urls)
+            enriched.append(msg_id)
+
+    return {
+        "success": True,
+        "scanned": len(messages),
+        "triggered_enrichment": len(enriched),
+        "enriched_ids": enriched
+    }
+
 
 # --- STATIC FRONTEND SERVING (ADMIN DASHBOARD) ---
 

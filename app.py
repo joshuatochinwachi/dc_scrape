@@ -1047,6 +1047,7 @@ async def extract_embed_data(message_element):
     """Extract embed data from Discord message"""
     embed_data = {
         "title": None,
+        "title_url": None,
         "description": None,
         "fields": [],
         "images": [],
@@ -1087,6 +1088,8 @@ async def extract_embed_data(message_element):
                 title_text = await title_elem.inner_text()
                 title_url = await title_elem.get_attribute('href')
                 embed_data["title"] = clean_text(title_text)
+                if title_url:
+                    embed_data["title_url"] = title_url
                 if title_url and title_url not in [l.get("url") for l in embed_data["links"]]:
                     embed_data["links"].append({"type": "title", "text": embed_data["title"], "url": title_url})
         except: pass
@@ -1158,14 +1161,87 @@ async def extract_embed_data(message_element):
         except: pass
         
         try:
-            thumb_elem = embed.locator('img[class*="embedThumbnail"]').first
-            if await thumb_elem.count() == 0:
-                thumb_elem = embed.locator('[class*="embedThumbnail"] img').first
+            img_candidates = []
             
-            if await thumb_elem.count() > 0:
-                thumb_src = await thumb_elem.get_attribute('src')
-                if thumb_src:
-                    embed_data["images"].append(thumb_src)
+            # 1. Comprehensive Discord image locators (Thumbnail, Full Image, Media, Wrapper)
+            selectors = [
+                'img[class*="embedThumbnail"]',
+                '[class*="embedThumbnail"] img',
+                'img[class*="embedImage"]',
+                '[class*="embedImage"] img',
+                '[class*="embedMedia"] img',
+                '[class*="imageWrapper"] img',
+                'article[class*="embed"] img:not([class*="embedAuthorIcon"]):not([class*="embedFooterIcon"])',
+            ]
+            
+            for sel in selectors:
+                elems = embed.locator(sel)
+                cnt = await elems.count()
+                for k in range(min(cnt, 5)):
+                    elem = elems.nth(k)
+                    src = await elem.get_attribute('src')
+                    
+                    # If Discord is lazy loading and src is a data:image base64 blur gradient
+                    if src and src.startswith('data:image'):
+                        # Check the parent <a> link which Discord wraps around the image
+                        try:
+                            parent_a = elem.locator('xpath=ancestor::a[1]')
+                            if await parent_a.count() > 0:
+                                a_href = await parent_a.get_attribute('href')
+                                if a_href and a_href.startswith('http'):
+                                    src = a_href
+                        except: pass
+                        
+                        # Also check data-src or data-original
+                        if src and src.startswith('data:image'):
+                            try:
+                                d_src = await elem.get_attribute('data-src') or await elem.get_attribute('data-original')
+                                if d_src and d_src.startswith('http'):
+                                    src = d_src
+                            except: pass
+
+                    if src and src.startswith('http') and not src.startswith('data:image'):
+                        if src not in img_candidates:
+                            img_candidates.append(src)
+            
+            # Check attachments if no embed images
+            if not img_candidates:
+                try:
+                    att_elems = message_element.locator('[class*="attachment"] img, [id^="message-accessories-"] img')
+                    att_cnt = await att_elems.count()
+                    for k in range(min(att_cnt, 3)):
+                        att_src = await att_elems.nth(k).get_attribute('src')
+                        if att_src and att_src.startswith('http') and not att_src.startswith('data:image'):
+                            if att_src not in img_candidates:
+                                img_candidates.append(att_src)
+                except: pass
+
+            if img_candidates:
+                embed_data["images"].extend(img_candidates)
+                embed_data["thumbnail"] = img_candidates[0]
+            else:
+                # 2. If Discord DOM didn't have an image, check product links and scrape high-res image
+                cand_urls = []
+                if embed_data.get("title_url"):
+                    cand_urls.append(embed_data["title_url"])
+                for l in embed_data.get('links', []):
+                    u = l.get('url', '')
+                    if u.startswith('http') and u not in cand_urls:
+                        cand_urls.append(u)
+                target_url = None
+                skip_patterns = ['keepa.com', 'ebay.com/sch', 'login', 'cart', 'checkout', 'bugs.zephr', '/member/']
+                for u in cand_urls:
+                    if not any(x in u.lower() for x in skip_patterns):
+                        target_url = u
+                        break
+                if target_url:
+                    try:
+                        from telegram_bot import fetch_product_images
+                        scraped = fetch_product_images(target_url, max_images=1)
+                        if scraped and scraped[0].startswith('http'):
+                            embed_data["images"].append(scraped[0])
+                            embed_data["thumbnail"] = scraped[0]
+                    except: pass
         except: pass
         
         try:
