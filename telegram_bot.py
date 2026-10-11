@@ -223,10 +223,14 @@ def optimize_image_url(url: str) -> str:
         
         # 1. Decode Discord Proxy URLs
         if "images-ext-" in url and "discordapp.net" in url:
-            if "/https/" in url:
-                url = "https://" + url.split("/https/", 1)[1]
-            elif "/http/" in url:
-                url = "http://" + url.split("/http/", 1)[1]
+            # ⚠️ DO NOT unwrap Vinted or signature-tokened URLs!
+            # Vinted's CDN rejects unwrapped links without tokens (HTTP 404).
+            # Discord's proxy caches and serves them cleanly with HTTP 200.
+            if "vinted" not in url.lower() and "%3fs%3d" not in url.lower():
+                if "/https/" in url:
+                    url = "https://" + url.split("/https/", 1)[1]
+                elif "/http/" in url:
+                    url = "http://" + url.split("/http/", 1)[1]
         
         # 2. Amazon Image Optimization (CRITICAL)
         if any(domain in url for domain in ['media-amazon.com', 'images-amazon.com', 'ssl-images-amazon.com']):

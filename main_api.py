@@ -132,8 +132,9 @@ def optimize_image_url(url: str) -> str:
     if not url: return url
     try:
         if "images-ext-" in url and "discordapp.net" in url:
-            if "/https/" in url: url = "https://" + url.split("/https/", 1)[1]
-            elif "/http/" in url: url = "http://" + url.split("/http/", 1)[1]
+            if "vinted" not in url.lower() and "%3fs%3d" not in url.lower():
+                if "/https/" in url: url = "https://" + url.split("/https/", 1)[1]
+                elif "/http/" in url: url = "http://" + url.split("/http/", 1)[1]
         if any(domain in url for domain in ['media-amazon.com', 'images-amazon.com', 'ssl-images-amazon.com']):
             url = re.sub(r'\._[A-Z_]+[0-9]+_\.', '.', url)
             if "?" in url: url = url.split("?")[0]
