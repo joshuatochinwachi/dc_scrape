@@ -2634,8 +2634,31 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     
     if not sm.stripe_price_id_monthly:
-        if msg:
-            await msg.reply_text("❌ Payments are currently disabled (Price ID not set).")
+        disabled_text = (
+            "ℹ️ <b>Stripe Subscriptions Temporarily Inactive</b>\n\n"
+            "Stripe subscriptions on Telegram are currently not active.\n\n"
+            "📲 <b>How to get access:</b>\n"
+            "• Subscribe directly through the <b>HollowScan app</b> and connect your Telegram bot through the app.\n"
+            "• Or take advantage of the promos you'll find on the app to unlock free access to both the app and Telegram bot!\n\n"
+            "🌐 <b>Download / Learn more:</b>\n"
+            "https://retail.hollowscan.com\n\n"
+            "✉️ If you encounter any difficulty and need assistance, do well to contact the admin via email at support@hollowscan.com"
+        )
+        keyboard = [[InlineKeyboardButton("◀️ Back", callback_data="back:main")]]
+        if update.callback_query:
+            await update.callback_query.edit_message_text(
+                disabled_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                disable_web_page_preview=True
+            )
+        elif msg:
+            await msg.reply_text(
+                disabled_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                disable_web_page_preview=True
+            )
         return
 
     keyboard = [
@@ -3054,6 +3077,8 @@ Use /help for all commands.
     else:
         welcome_text += "❌ <b>Not subscribed</b>\n\nRedeem a code or subscribe below to get started!\n"
 
+    welcome_text += "\n\n📱 To learn more about HollowScan and download the mobile app, visit https://retail.hollowscan.com"
+
     await update.message.reply_text(
         welcome_text,
         parse_mode=ParseMode.HTML,
@@ -3086,6 +3111,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 welcome_text += '\n💡 <b>Tip:</b> Click on "⚙️ <b>Alert Settings</b>" below to toggle ✅ on or ❌ off any country store you want to receive (or stop receiving) notifications from. Customize your experience!'
             else:
                 welcome_text += "❌ <b>Not subscribed</b>\n\nRedeem a code or subscribe below to get started!\n"
+            
+            welcome_text += "\n\n📱 To learn more about HollowScan and download the mobile app, visit https://retail.hollowscan.com"
             
             try:
                 await query.edit_message_text(welcome_text, parse_mode=ParseMode.HTML, reply_markup=create_main_menu(user_id))
