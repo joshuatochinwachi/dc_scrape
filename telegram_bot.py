@@ -3082,7 +3082,8 @@ Use /help for all commands.
     await update.message.reply_text(
         welcome_text,
         parse_mode=ParseMode.HTML,
-        reply_markup=create_main_menu(user_id)
+        reply_markup=create_main_menu(user_id),
+        disable_web_page_preview=True
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3115,7 +3116,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             welcome_text += "\n\n📱 To learn more about HollowScan and download the mobile app, visit https://retail.hollowscan.com"
             
             try:
-                await query.edit_message_text(welcome_text, parse_mode=ParseMode.HTML, reply_markup=create_main_menu(user_id))
+                await query.edit_message_text(
+                    welcome_text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=create_main_menu(user_id),
+                    disable_web_page_preview=True
+                )
             except BadRequest as e:
                 if "Message is not modified" not in str(e):
                     raise e
