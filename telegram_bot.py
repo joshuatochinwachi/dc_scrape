@@ -3038,7 +3038,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Custom category preferences  
 • Premium tier for advanced features
 
-Use /settings to customize your alerts or /help for all commands.
+Use /help for all commands.
 
 📊 <b>Status:</b>
 """
@@ -3982,6 +3982,9 @@ ADMIN_COMMANDS = [
     BotCommand("promos", "List all promo codes and usage stats"),
     BotCommand("revoke_promo", "Deactivate a promo code (e.g., /revoke_promo CODE)"),
     BotCommand("test", "Test recent alerts (e.g., /test 5)"),
+    BotCommand("scraper_start", "Start the Discord stealth archiver"),
+    BotCommand("scraper_stop", "Stop the Discord stealth archiver"),
+    BotCommand("scraper_status", "Check archiver status and stats"),
     BotCommand("add_channel", "Add scraper channel"),
     BotCommand("remove_channel", "Remove scraper channel"),
     BotCommand("channels", "List all channels"),
@@ -3996,6 +3999,9 @@ SUPERADMIN_COMMANDS = [
     BotCommand("promos", "List all promo codes and usage stats"),
     BotCommand("revoke_promo", "Deactivate a promo code (e.g., /revoke_promo CODE)"),
     BotCommand("test", "Test recent alerts (e.g., /test 5)"),
+    BotCommand("scraper_start", "Start the Discord stealth archiver"),
+    BotCommand("scraper_stop", "Stop the Discord stealth archiver"),
+    BotCommand("scraper_status", "Check archiver status and stats"),
     BotCommand("add_admin", "Add a user as admin (e.g., /add_admin 123456)"),
     BotCommand("remove_admin", "Remove admin status (e.g., /remove_admin 123456)"),
     BotCommand("add_channel", "Add scraper channel"),
@@ -4403,6 +4409,150 @@ async def unpin_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
+# --- SCRAPER CONTROL COMMANDS ---
+
+_SCRAPER_API_BASE = "http://127.0.0.1:5000"
+
+async def scraper_start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: Start the Discord stealth archiver (same as the web dashboard START STEALTH MODE button)."""
+    user_id = str(update.effective_user.id)
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Admin only.")
+        return
+
+    await update.message.reply_text("⏳ Sending start signal to archiver...")
+    try:
+        loop = asyncio.get_event_loop()
+        resp = await loop.run_in_executor(
+            sync_executor,
+            lambda: requests.post(f"{_SCRAPER_API_BASE}/api/start", timeout=10)
+        )
+        if resp.status_code == 200:
+            await update.message.reply_text(
+                "✅ <b>Archiver Started!</b>\n\n"
+                "🎭 Stealth mode is now <b>ACTIVE</b>.\n"
+                "Use /scraper_status to check progress.",
+                parse_mode=ParseMode.HTML
+            )
+        elif resp.status_code == 409:
+            await update.message.reply_text(
+                "ℹ️ <b>Already Running</b>\n\n"
+                "The archiver is already active. Use /scraper_status for details.",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ Unexpected response from archiver: <code>{resp.status_code}</code>",
+                parse_mode=ParseMode.HTML
+            )
+    except requests.exceptions.ConnectionError:
+        await update.message.reply_text(
+            "❌ <b>Connection Failed</b>\n\n"
+            "Could not reach the archiver server. Make sure app.py is running.",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.error(f"scraper_start_cmd error: {e}")
+        await update.message.reply_text(f"❌ Error: <code>{str(e)[:200]}</code>", parse_mode=ParseMode.HTML)
+
+
+async def scraper_stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: Stop the Discord stealth archiver (same as the web dashboard STOP ARCHIVER button)."""
+    user_id = str(update.effective_user.id)
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Admin only.")
+        return
+
+    await update.message.reply_text("⏳ Sending stop signal to archiver...")
+    try:
+        loop = asyncio.get_event_loop()
+        resp = await loop.run_in_executor(
+            sync_executor,
+            lambda: requests.post(f"{_SCRAPER_API_BASE}/api/stop", timeout=10)
+        )
+        if resp.status_code == 200:
+            await update.message.reply_text(
+                "🛑 <b>Stop Signal Sent!</b>\n\n"
+                "The archiver will finish its current operation and then stop gracefully.\n"
+                "Use /scraper_status to confirm.",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ Unexpected response: <code>{resp.status_code}</code>",
+                parse_mode=ParseMode.HTML
+            )
+    except requests.exceptions.ConnectionError:
+        await update.message.reply_text(
+            "❌ <b>Connection Failed</b>\n\n"
+            "Could not reach the archiver server. Make sure app.py is running.",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.error(f"scraper_stop_cmd error: {e}")
+        await update.message.reply_text(f"❌ Error: <code>{str(e)[:200]}</code>", parse_mode=ParseMode.HTML)
+
+
+async def scraper_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: Get current archiver status and stats."""
+    user_id = str(update.effective_user.id)
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Admin only.")
+        return
+
+    try:
+        loop = asyncio.get_event_loop()
+        resp = await loop.run_in_executor(
+            sync_executor,
+            lambda: requests.post(f"{_SCRAPER_API_BASE}/api/test", timeout=10)
+        )
+        if resp.status_code == 200:
+            d = resp.json()
+            status = d.get("archiver_status", "UNKNOWN")
+            status_icon = "🟢" if status == "RUNNING" else ("🟡" if status == "SLEEPING" else "🔴")
+            lines = [
+                f"🎭 <b>Discord Archiver Status</b>",
+                "",
+                f"{status_icon} Status: <b>{status}</b>",
+                f"🔢 Total Checks: <b>{d.get('total_checks', 0)}</b>",
+                f"🖱️ Mouse Moves: <b>{d.get('mouse_movements', 0)}</b>",
+                f"📜 Scrolls: <b>{d.get('scrolls', 0)}</b>",
+                f"💤 Idle Breaks: <b>{d.get('idle_breaks', 0)}</b>",
+                f"⚠️ Error Channels: <b>{len(d.get('error_counts', {}))}</b>",
+            ]
+            session_start = d.get("session_start")
+            if session_start:
+                try:
+                    start_dt = parse_iso_datetime(session_start)
+                    elapsed = datetime.utcnow() - start_dt
+                    h, rem = divmod(int(elapsed.total_seconds()), 3600)
+                    m = rem // 60
+                    lines.append(f"⏱️ Uptime: <b>{h}h {m}m</b>")
+                except Exception:
+                    pass
+            await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+        elif resp.status_code == 400:
+            await update.message.reply_text(
+                "🔴 <b>Archiver Not Running</b>\n\n"
+                "Use /scraper_start to launch it.",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ Unexpected response: <code>{resp.status_code}</code>",
+                parse_mode=ParseMode.HTML
+            )
+    except requests.exceptions.ConnectionError:
+        await update.message.reply_text(
+            "❌ <b>Connection Failed</b>\n\n"
+            "Could not reach the archiver server. Make sure app.py is running.",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.error(f"scraper_status_cmd error: {e}")
+        await update.message.reply_text(f"❌ Error: <code>{str(e)[:200]}</code>", parse_mode=ParseMode.HTML)
+
+
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show available commands based on user role"""
     user_id = str(update.effective_user.id)
@@ -4426,6 +4576,11 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /promos - List all promo codes
 /revoke_promo [CODE] - Deactivate a promo code
 /test [count] - Test recent alerts
+
+<b>Scraper Control:</b>
+/scraper_start - ▶ Start the Discord stealth archiver
+/scraper_stop - ■ Stop the Discord stealth archiver
+/scraper_status - ⟳ Check archiver status & stats
 
 <b>Channel Management:</b>
 /add_channel [url] [category] [name] - Add scraper
@@ -4454,6 +4609,11 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /promos - List all promo codes
 /revoke_promo [CODE] - Deactivate a promo code
 /test [count] - Test recent alerts
+
+<b>Scraper Control:</b>
+/scraper_start - ▶ Start the Discord stealth archiver
+/scraper_stop - ■ Stop the Discord stealth archiver
+/scraper_status - ⟳ Check archiver status & stats
 
 <b>Channel Management:</b>
 /add_channel [url] [category] [name] - Add scraper
@@ -4583,6 +4743,9 @@ def run_bot():
             app.add_handler(CommandHandler("add_channel", add_channel_cmd))
             app.add_handler(CommandHandler("remove_channel", remove_channel_cmd))
             app.add_handler(CommandHandler("channels", list_channels_cmd))
+            app.add_handler(CommandHandler("scraper_start", scraper_start_cmd))
+            app.add_handler(CommandHandler("scraper_stop", scraper_stop_cmd))
+            app.add_handler(CommandHandler("scraper_status", scraper_status_cmd))
             app.add_handler(CommandHandler("subscribe", subscribe))
             app.add_handler(CommandHandler("billing", billing_portal))
             app.add_handler(CommandHandler("help", show_help))
