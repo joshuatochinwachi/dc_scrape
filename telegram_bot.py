@@ -26,6 +26,15 @@ import uuid
 
 load_dotenv()
 
+# --- RP LOGO FILTER CONSTANTS ---
+# Reference image URL for the RP (RetailPinger/similar) platform logo to filter out.
+# The pHash is computed ONCE at startup so no repeated downloads are needed.
+_RP_LOGO_URL = "https://raw.githubusercontent.com/joshuatochinwachi/HollowScan-Mobile-App/main/public/RP_logo.png"
+_FALLBACK_IMAGE_URL = "https://raw.githubusercontent.com/joshuatochinwachi/HollowScan-Mobile-App/main/public/no_image.png"
+_RP_LOGO_PHASH: Optional[Any] = None  # Populated by _load_rp_logo_phash() at startup
+_LOGO_HASH_THRESHOLD = 10  # Max hamming distance to consider a match (0=identical, ~10=very similar)
+
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 # Support multiple admin IDs (comma-separated)
 ADMIN_USER_IDS = [id.strip() for id in os.getenv("TELEGRAM_ADMIN_ID", "").split(",") if id.strip()]
@@ -1584,6 +1593,208 @@ class MessagePoller:
 
 
 
+# --- RP LOGO PHASH UTILITIES ---
+
+_PHASH_URL_CACHE: Dict[str, Optional[int]] = {}
+_PHASH_CACHE_LOCK = threading.Lock()
+
+def _compute_phash(img_bytes: bytes) -> Optional[int]:
+    """
+    Compute perceptual average-hash of an image from raw bytes.
+    Returns a 1024-bit integer hash (32x32 binary matrix), or None on failure.
+    Robust to resizing, compression, and color profiles, with alpha-compositing
+    to ensure transparent PNGs and JPEGs produce matching hashes.
+    """
+    try:
+        raw_img = Image.open(BytesIO(img_bytes))
+        # Handle alpha channel cleanly: composite transparent pixels over white
+        if raw_img.mode in ("RGBA", "LA") or (raw_img.mode == "P" and "transparency" in raw_img.info):
+            raw_img = raw_img.convert("RGBA")
+            bg = Image.new("RGBA", raw_img.size, (255, 255, 255, 255))
+            bg.alpha_composite(raw_img)
+            img = bg.convert("L")
+        else:
+            img = raw_img.convert("L")
+
+        img = img.resize((32, 32), Image.LANCZOS)
+        pixels = list(img.getdata())
+        avg = sum(pixels) / len(pixels)
+        bits = [1 if p >= avg else 0 for p in pixels]
+        phash_int = int("".join(str(b) for b in bits), 2)
+        return phash_int
+    except Exception as e:
+        logger.debug(f"pHash compute error: {e}")
+        return None
+
+
+def _hamming_distance(h1: int, h2: int) -> int:
+    """Count differing bits between two integer pHashes."""
+    return bin(h1 ^ h2).count("1")
+
+
+def _load_rp_logo_phash():
+    """
+    Load the RP logo reference image and compute its pHash.
+    Checks local filesystem (public/RP_logo.png) first for instant startup,
+    falling back to GitHub raw URL.
+    """
+    global _RP_LOGO_PHASH
+    local_candidates = [
+        "public/RP_logo.png",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "public", "RP_logo.png"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "public", "RP_logo.png"),
+    ]
+
+    # 1. Try local disk first (fast, resilient, zero-network)
+    for path in local_candidates:
+        if os.path.exists(path):
+            try:
+                with open(path, "rb") as f:
+                    content = f.read()
+                phash = _compute_phash(content)
+                if phash is not None:
+                    _RP_LOGO_PHASH = phash
+                    logger.info(f"✅ RP logo pHash loaded from local file ({path}): {hex(phash)}")
+                    return
+            except Exception as e:
+                logger.warning(f"⚠️  Failed reading local RP logo from {path}: {e}")
+
+    # 2. Remote fallback
+    try:
+        logger.info("🖼️  Downloading RP logo reference from remote...")
+        resp = requests.get(
+            _RP_LOGO_URL,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15
+        )
+        resp.raise_for_status()
+        phash = _compute_phash(resp.content)
+        if phash is not None:
+            _RP_LOGO_PHASH = phash
+            logger.info(f"✅ RP logo pHash loaded from remote: {hex(phash)}")
+        else:
+            logger.warning("⚠️  Failed to compute RP logo pHash — logo filter disabled until restart.")
+    except Exception as e:
+        logger.warning(f"⚠️  Could not download RP logo ({e}) — logo filter disabled until restart.")
+
+
+
+# --- LOGO FILTER CHANNEL MANAGER ---
+
+class LogoFilterManager:
+    """
+    Manages a persistent set of channel IDs whose messages should be scrutinised
+    for the RP platform logo image. When a message from these channels has the
+    platform logo as its product image, the image is automatically replaced with
+    HollowScan's clean generic fallback image (no_image.png) so valuable deals
+    and restocks are NEVER dropped and users still receive all products!
+    """
+
+    def __init__(self):
+        self.channel_ids: set = set()
+        self.lock = threading.Lock()
+        self.local_path = "data/logo_filter_channels.json"
+        self.remote_path = "discord_josh/logo_filter_channels.json"
+        os.makedirs("data", exist_ok=True)
+        # --- Runtime stats (in-memory only, reset on restart) ---
+        self.sanitized_count: int = 0         # Total images sanitized with fallback since restart
+        self.recent_sanitized: list = []      # Last 20 sanitized products (newest first)
+        self.filtered_count = 0               # Compatibility alias
+        self.recent_filtered = self.recent_sanitized
+        self._load()
+
+    def _load(self):
+        """Load filter list from Supabase with local fallback."""
+        loaded = False
+        try:
+            data = supabase_utils.download_file(self.local_path, self.remote_path, SUPABASE_BUCKET)
+            if data:
+                self.channel_ids = set(json.loads(data))
+                loaded = True
+                logger.info(f"✅ Loaded {len(self.channel_ids)} logo-filter channel(s) from Supabase")
+        except Exception as e:
+            logger.warning(f"⚠️  Logo filter load error: {e}")
+
+        if not loaded and os.path.exists(self.local_path):
+            try:
+                with open(self.local_path, "r") as f:
+                    self.channel_ids = set(json.load(f))
+            except Exception:
+                pass
+
+    def _save(self):
+        """Persist filter list locally and sync to Supabase."""
+        try:
+            with open(self.local_path, "w") as f:
+                json.dump(list(self.channel_ids), f)
+            supabase_utils.upload_file(self.local_path, SUPABASE_BUCKET, self.remote_path, debug=False)
+        except Exception as e:
+            logger.error(f"Logo filter save error: {e}")
+
+    def add(self, channel_id: str) -> bool:
+        with self.lock:
+            cid = str(channel_id).strip()
+            if cid in self.channel_ids:
+                return False
+            self.channel_ids.add(cid)
+            self._save()
+            return True
+
+    def remove(self, channel_id: str) -> bool:
+        with self.lock:
+            cid = str(channel_id).strip()
+            if cid not in self.channel_ids:
+                return False
+            self.channel_ids.discard(cid)
+            self._save()
+            return True
+
+    def has(self, channel_id: str) -> bool:
+        return str(channel_id).strip() in self.channel_ids
+
+    def record_sanitized(self, msg_data: Dict):
+        """Record a sanitized product for admin reporting."""
+        with self.lock:
+            raw = msg_data.get("raw_data", {}) or {}
+            embed = raw.get("embed") or {}
+            title = embed.get("title") or msg_data.get("content") or "(no title)"
+            channel_id = str(msg_data.get("channel_id", "?"))
+            msg_id = str(msg_data.get("id", "?"))
+            scraped_at = msg_data.get("scraped_at", "")[:16].replace("T", " ")
+            # Resolve channel name
+            name = next((c.get("name", "?") for c in cm.channels if c["id"] == channel_id), channel_id)
+            entry = {
+                "title": str(title)[:80],
+                "channel": name,
+                "channel_id": channel_id,
+                "msg_id": msg_id,
+                "scraped_at": scraped_at,
+            }
+            self.recent_sanitized.insert(0, entry)   # Newest first
+            self.recent_sanitized = self.recent_sanitized[:20]  # Keep last 20
+            self.sanitized_count += 1
+            self.filtered_count = self.sanitized_count
+
+    def record_filtered(self, msg_data: Dict):
+        """Compatibility wrapper for record_sanitized."""
+        self.record_sanitized(msg_data)
+
+    def get_stats(self) -> Dict:
+        """Return current filter/sanitization stats for admin display."""
+        with self.lock:
+            return {
+                "total": self.sanitized_count,
+                "recent": list(self.recent_sanitized),
+            }
+
+    def list_all(self) -> list:
+        with self.lock:
+            return sorted(self.channel_ids)
+
+
+lf = LogoFilterManager()  # Global instance — available throughout the module
+
+
 # --- CHANNEL MANAGER ---
 
 class ChannelManager:
@@ -2397,6 +2608,175 @@ def sync_resolved_image_to_supabase(msg_id: Any, image_url: str, raw_data: Dict)
             logger.debug(f"   ⚠️ Image sync exception: {err}")
 
     threading.Thread(target=_do_patch, daemon=True).start()
+
+
+
+def _sync_sanitized_image_to_supabase(msg_id: str, updated_raw: Dict):
+    """Asynchronously patch Supabase discord_messages with the sanitized fallback image."""
+    def _do_patch():
+        try:
+            sb_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+            sb_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY", "")
+            if not sb_url or not sb_key:
+                return
+            patch_headers = {
+                "apikey": sb_key,
+                "Authorization": f"Bearer {sb_key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal"
+            }
+            res = requests.patch(
+                f"{sb_url}/rest/v1/discord_messages?id=eq.{msg_id}",
+                headers=patch_headers,
+                json={"raw_data": updated_raw},
+                timeout=10
+            )
+            if res.status_code in [200, 204]:
+                logger.info(f"   🛡️ 💾 Synced sanitized image to Supabase for msg {msg_id}")
+        except Exception as e:
+            logger.debug(f"   ⚠️ Sanitized image sync exception: {e}")
+
+    threading.Thread(target=_do_patch, daemon=True).start()
+
+
+def sanitize_logo_image(msg_data: Dict) -> bool:
+    """
+    Check whether a message from a logo-monitored channel contains the RP
+    platform logo as its product image.
+
+    If matching:
+      - Automatically replaces the logo image URL with HollowScan's generic
+        fallback image (_FALLBACK_IMAGE_URL: no_image.png) in all embed slots.
+      - Asynchronously updates Supabase so the database record is sanitized.
+      - Records the sanitized product in LogoFilterManager stats.
+      - Returns True (indicating an image replacement occurred).
+
+    If NOT matching:
+      - Returns False and leaves the product image completely untouched.
+
+    The message itself is NEVER dropped — products always show on the bot & app!
+    """
+    # 1. Only apply to logo-filtered channels
+    channel_id = str(msg_data.get("channel_id", ""))
+    if not lf.has(channel_id):
+        return False
+
+    # 2. Reference hash must be available
+    if _RP_LOGO_PHASH is None:
+        logger.debug("Logo filter: reference pHash not loaded, skipping check")
+        return False
+
+    # 3. Extract the primary product image URL
+    raw = msg_data.get("raw_data", {}) or {}
+    embed = raw.get("embed") or (raw.get("embeds") or [{}])[0]
+    candidate_url = None
+
+    if embed.get("images") and isinstance(embed["images"], list) and embed["images"]:
+        candidate_url = embed["images"][0]
+    elif embed.get("image"):
+        img = embed["image"]
+        candidate_url = img.get("url") if isinstance(img, dict) else img
+    elif embed.get("thumbnail"):
+        thumb = embed["thumbnail"]
+        candidate_url = thumb.get("url") if isinstance(thumb, dict) else thumb
+    elif raw.get("product_image"):
+        candidate_url = raw.get("product_image")
+
+    if not candidate_url or not str(candidate_url).startswith("http"):
+        return False
+
+    candidate_url_str = str(candidate_url).strip()
+
+    # Fast path: instant string check (0ms, zero network)
+    c_low = candidate_url_str.lower()
+    if "rp_logo" in c_low or "retailpinger" in c_low:
+        logger.info(f"🛡️ LOGO SANITIZER: Fast-path string match on msg {msg_data.get('id')}. Replacing with fallback!")
+        if embed.get("images") and isinstance(embed["images"], list):
+            embed["images"] = [_FALLBACK_IMAGE_URL]
+        if embed.get("image"):
+            if isinstance(embed["image"], dict):
+                embed["image"]["url"] = _FALLBACK_IMAGE_URL
+            else:
+                embed["image"] = _FALLBACK_IMAGE_URL
+        if embed.get("thumbnail"):
+            if isinstance(embed["thumbnail"], dict):
+                embed["thumbnail"]["url"] = _FALLBACK_IMAGE_URL
+            else:
+                embed["thumbnail"] = _FALLBACK_IMAGE_URL
+        raw["product_image"] = _FALLBACK_IMAGE_URL
+
+        lf.record_sanitized(msg_data)
+        msg_id = msg_data.get("id")
+        if msg_id:
+            _sync_sanitized_image_to_supabase(str(msg_id), raw)
+        return True
+
+    # 4. Check cache first
+    with _PHASH_CACHE_LOCK:
+        cached_hash = _PHASH_URL_CACHE.get(candidate_url_str)
+
+    if cached_hash is not None:
+        candidate_hash = cached_hash
+    else:
+        # Download and hash the candidate image
+        try:
+            resp = requests.get(
+                candidate_url_str,
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=10
+            )
+            if resp.status_code != 200:
+                return False
+            candidate_hash = _compute_phash(resp.content)
+            with _PHASH_CACHE_LOCK:
+                _PHASH_URL_CACHE[candidate_url_str] = candidate_hash
+                # Bound cache size to prevent unbounded memory growth
+                if len(_PHASH_URL_CACHE) > 2000:
+                    _PHASH_URL_CACHE.clear()
+        except Exception as e:
+            logger.debug(f"Logo filter image check error: {e}")
+            return False
+
+    if candidate_hash is None:
+        return False
+
+    distance = _hamming_distance(_RP_LOGO_PHASH, candidate_hash)
+    if distance <= _LOGO_HASH_THRESHOLD:
+        logger.info(
+            f"🛡️ LOGO SANITIZER: Detected RP logo on msg {msg_data.get('id')} from ch {channel_id} "
+            f"(distance={distance}/{_LOGO_HASH_THRESHOLD}). Replacing with fallback image!"
+        )
+        # 1. Update in-memory embed & raw_data so Telegram formatting & sending uses no_image.png
+        if embed.get("images") and isinstance(embed["images"], list):
+            embed["images"] = [_FALLBACK_IMAGE_URL]
+        if embed.get("image"):
+            if isinstance(embed["image"], dict):
+                embed["image"]["url"] = _FALLBACK_IMAGE_URL
+            else:
+                embed["image"] = _FALLBACK_IMAGE_URL
+        if embed.get("thumbnail"):
+            if isinstance(embed["thumbnail"], dict):
+                embed["thumbnail"]["url"] = _FALLBACK_IMAGE_URL
+            else:
+                embed["thumbnail"] = _FALLBACK_IMAGE_URL
+        raw["product_image"] = _FALLBACK_IMAGE_URL
+
+        # 2. Record for admin dashboard tracking
+        lf.record_sanitized(msg_data)
+
+        # 3. Asynchronously sync to Supabase so the database record is also sanitized
+        msg_id = msg_data.get("id")
+        if msg_id:
+            _sync_sanitized_image_to_supabase(str(msg_id), raw)
+
+        return True
+
+    return False
+
+
+def is_logo_filtered_image(msg_data: Dict) -> bool:
+    """Compatibility wrapper that sanitizes the logo image if matching."""
+    return sanitize_logo_image(msg_data)
 
 
 
@@ -3595,6 +3975,137 @@ async def remove_channel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         await update.message.reply_text("❌ Channel ID not found.", parse_mode=ParseMode.HTML)
 
+
+async def add_logo_filter_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: Add a channel to the RP logo image filter list.
+    Messages from this channel whose product image matches the RP logo will have their
+    image sanitized and replaced with HollowScan's generic fallback (no_image.png),
+    ensuring deals and restocks are ALWAYS delivered without proprietary logos.
+    Usage: /add_logo_filter <channel_id>
+    """
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Admin only.")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /add_logo_filter <channel_id>\n"
+            "Example: /add_logo_filter 864504557903937587\n\n"
+            "When products from this channel have the RP platform logo, the logo will be "
+            "automatically replaced with HollowScan's clean fallback (no_image.png) so "
+            "products always show on the app and bot."
+        )
+        return
+
+    channel_id = context.args[0].strip()
+    if not channel_id.isdigit():
+        await update.message.reply_text("❌ Channel ID must be numeric (digits only).")
+        return
+
+    # Warn if the logo pHash isn't loaded yet
+    phash_status = (
+        f"✅ Logo reference hash is loaded (<code>{hex(_RP_LOGO_PHASH)[:12]}...</code>)."
+        if _RP_LOGO_PHASH is not None
+        else "⚠️ <b>Warning:</b> RP logo reference hash is not loaded yet. Restart the bot to activate filtering."
+    )
+
+    if lf.add(channel_id):
+        await update.message.reply_text(
+            f"🛡️ <b>Logo Filter & Sanitizer Added!</b>\n\n"
+            f"Channel ID: <code>{channel_id}</code> is now scrutinized for the RP logo.\n"
+            f"Products bearing the RP logo will have their image sanitized to <code>no_image.png</code>.\n"
+            f"All products, links, and prices will still be delivered normally!\n\n"
+            f"{phash_status}",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        await update.message.reply_text(
+            f"ℹ️ Channel <code>{channel_id}</code> is already in the logo-filter list.",
+            parse_mode=ParseMode.HTML
+        )
+
+
+async def remove_logo_filter_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: Remove a channel from the RP logo image filter list.
+    Usage: /remove_logo_filter <channel_id>
+    """
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Admin only.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /remove_logo_filter <channel_id>")
+        return
+
+    channel_id = context.args[0].strip()
+    if lf.remove(channel_id):
+        await update.message.reply_text(
+            f"✅ Channel <code>{channel_id}</code> removed from logo-filter list.\n"
+            "Images from this channel will no longer be checked or sanitized.",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        await update.message.reply_text(
+            f"❌ Channel <code>{channel_id}</code> was not in the logo-filter list.",
+            parse_mode=ParseMode.HTML
+        )
+
+
+async def list_logo_filters_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: Show logo filter config, total sanitized count, and recent sanitized products."""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Admin only.")
+        return
+
+    filter_ids = lf.list_all()
+    stats = lf.get_stats()
+    phash_status = (
+        f"✅ RP logo hash loaded: <code>{hex(_RP_LOGO_PHASH)[:18]}...</code>"
+        if _RP_LOGO_PHASH is not None
+        else "⚠️ <b>RP logo hash NOT loaded</b> — sanitizing inactive. Restart the bot."
+    )
+
+    # --- Header block ---
+    lines = [
+        "🛡️ <b>Logo Filter & Sanitizer Dashboard</b>\n",
+        phash_status,
+        f"📏 Threshold: <b>{_LOGO_HASH_THRESHOLD} bits</b> hamming distance",
+        f"🖼️ Fallback Image: <code>no_image.png</code>",
+        f"🔢 Sanitized since last restart: <b>{stats['total']}</b> (deals preserved)\n",
+    ]
+
+    # --- Filtered channels ---
+    if not filter_ids:
+        lines.append("📋 <b>Scrutinized Channels:</b> <i>None configured.</i>")
+        lines.append("Use /add_logo_filter &lt;channel_id&gt; to add one.")
+    else:
+        lines.append("📋 <b>Scrutinized Channels:</b>")
+        for cid in filter_ids:
+            name = next((c.get("name", "?") for c in cm.channels if c["id"] == cid), "Unknown")
+            lines.append(f"  • <code>{cid}</code> — {name}")
+
+    # --- Recent sanitized products ---
+    recent = stats["recent"]
+    if recent:
+        lines.append(f"\n🗂 <b>Recently Sanitized Products ({len(recent)} shown, newest first):</b>")
+        for i, entry in enumerate(recent, 1):
+            lines.append(
+                f"  {i}. <b>{entry['title']}</b> <i>(Replaced with fallback)</i>\n"
+                f"     📺 {entry['channel']} | 🕐 {entry['scraped_at']}"
+            )
+    else:
+        lines.append("\n🗂 <b>Recently Sanitized:</b> <i>None yet this session.</i>")
+
+    full_text = "\n".join(lines)
+
+    # Telegram hard cap is 4096 chars — split if needed
+    if len(full_text) <= 4000:
+        await update.message.reply_text(full_text, parse_mode=ParseMode.HTML)
+    else:
+        header_end = lines.index(next(l for l in lines if "Recently Sanitized" in l))
+        await update.message.reply_text("\n".join(lines[:header_end]), parse_mode=ParseMode.HTML)
+        await update.message.reply_text("\n".join(lines[header_end:]), parse_mode=ParseMode.HTML)
+
 async def list_channels_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin: List all channels"""
     if not is_admin(update.effective_user.id):
@@ -3800,6 +4311,11 @@ async def _broadcast_job_inner(context: ContextTypes.DEFAULT_TYPE):
         # LAYER A: Existing filters (Duplicate source/Restock filter)
         if is_duplicate_source(msg) or is_restock_filter_match(msg):
             continue
+
+        # LAYER A2: Logo image sanitizer (channel-specific, pHash-based)
+        # Replaces proprietary platform logo with clean generic fallback (no_image.png)
+        # so valuable products and deals are NEVER dropped!
+        sanitize_logo_image(msg)
             
         # LAYER B: Aggressive Duplicate Content Check (If Title == Description/Content)
         # We check this before formatting to save CPU
@@ -4021,6 +4537,9 @@ ADMIN_COMMANDS = [
     BotCommand("add_channel", "Add scraper channel"),
     BotCommand("remove_channel", "Remove scraper channel"),
     BotCommand("channels", "List all channels"),
+    BotCommand("add_logo_filter", "Add channel to logo filter (e.g., /add_logo_filter 123)"),
+    BotCommand("remove_logo_filter", "Remove channel from logo filter"),
+    BotCommand("logo_filters", "List logo-filtered channels and filter status"),
 ]
 
 # Additional commands for superadmin
@@ -4040,6 +4559,9 @@ SUPERADMIN_COMMANDS = [
     BotCommand("add_channel", "Add scraper channel"),
     BotCommand("remove_channel", "Remove scraper channel"),
     BotCommand("channels", "List all channels"),
+    BotCommand("add_logo_filter", "Add channel to logo filter (e.g., /add_logo_filter 123)"),
+    BotCommand("remove_logo_filter", "Remove channel from logo filter"),
+    BotCommand("logo_filters", "List logo-filtered channels and filter status"),
 ]
 
 async def setup_bot_commands(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4620,6 +5142,11 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /remove_channel [id] - Remove scraper
 /channels - List all channels
 
+<b>Logo Image Filtering:</b>
+/add_logo_filter [channel_id] - Filter RP logo images from a channel
+/remove_logo_filter [channel_id] - Stop filtering a channel
+/logo_filters - List filtered channels &amp; filter status
+
 <b>User Management:</b>
 /add_admin [user_id] - Add an admin
 /remove_admin [user_id] - Remove an admin
@@ -4652,6 +5179,11 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /add_channel [url] [category] [name] - Add scraper
 /remove_channel [id] - Remove scraper
 /channels - List all channels
+
+<b>Logo Image Filtering:</b>
+/add_logo_filter [channel_id] - Filter RP logo images from a channel
+/remove_logo_filter [channel_id] - Stop filtering a channel
+/logo_filters - List filtered channels &amp; filter status
 """
     else:
         menu_text = """
@@ -4776,6 +5308,9 @@ def run_bot():
             app.add_handler(CommandHandler("add_channel", add_channel_cmd))
             app.add_handler(CommandHandler("remove_channel", remove_channel_cmd))
             app.add_handler(CommandHandler("channels", list_channels_cmd))
+            app.add_handler(CommandHandler("add_logo_filter", add_logo_filter_cmd))
+            app.add_handler(CommandHandler("remove_logo_filter", remove_logo_filter_cmd))
+            app.add_handler(CommandHandler("logo_filters", list_logo_filters_cmd))
             app.add_handler(CommandHandler("scraper_start", scraper_start_cmd))
             app.add_handler(CommandHandler("scraper_stop", scraper_stop_cmd))
             app.add_handler(CommandHandler("scraper_status", scraper_status_cmd))
@@ -4786,6 +5321,9 @@ def run_bot():
             app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
             
             app.add_error_handler(error_handler)
+            
+            # Load the RP logo pHash once before the bot starts polling
+            _load_rp_logo_phash()
             
             if app.job_queue:
                 app.job_queue.run_repeating(broadcast_job, interval=POLL_INTERVAL, first=10)
