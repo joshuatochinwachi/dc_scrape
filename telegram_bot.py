@@ -27,11 +27,13 @@ import uuid
 load_dotenv()
 
 # --- RP LOGO FILTER CONSTANTS ---
-# Reference image URL for the RP (RetailPinger/similar) platform logo to filter out.
-# The pHash is computed ONCE at startup so no repeated downloads are needed.
+# Reference image URLs for the RP (RetailPinger/similar) platform logo variations to filter out.
+# pHashes are computed ONCE at startup so no repeated downloads are needed.
 _RP_LOGO_URL = "https://raw.githubusercontent.com/joshuatochinwachi/HollowScan-Mobile-App/main/public/RP_logo.png"
+_RP_LOGO_URL2 = "https://raw.githubusercontent.com/joshuatochinwachi/HollowScan-Mobile-App/main/public/RP_logo2.png"
 _FALLBACK_IMAGE_URL = "https://raw.githubusercontent.com/joshuatochinwachi/HollowScan-Mobile-App/main/public/no_image.png"
-_RP_LOGO_PHASH: Optional[Any] = None  # Populated by _load_rp_logo_phash() at startup
+_RP_LOGO_PHASHES: List[int] = []  # Populated with all variations by _load_rp_logo_phash() at startup
+_RP_LOGO_PHASH: Optional[Any] = None  # Compatibility alias (first hash)
 _LOGO_HASH_THRESHOLD = 10  # Max hamming distance to consider a match (0=identical, ~10=very similar)
 
 
@@ -1634,48 +1636,59 @@ def _hamming_distance(h1: int, h2: int) -> int:
 
 def _load_rp_logo_phash():
     """
-    Load the RP logo reference image and compute its pHash.
-    Checks local filesystem (public/RP_logo.png) first for instant startup,
-    falling back to GitHub raw URL.
+    Load the RP logo reference image variations and compute their pHashes.
+    Checks local filesystem first for instant startup, falling back to GitHub raw URL.
     """
-    global _RP_LOGO_PHASH
-    local_candidates = [
-        "public/RP_logo.png",
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "public", "RP_logo.png"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "public", "RP_logo.png"),
-    ]
+    global _RP_LOGO_PHASHES, _RP_LOGO_PHASH
+    hashes = []
 
-    # 1. Try local disk first (fast, resilient, zero-network)
-    for path in local_candidates:
-        if os.path.exists(path):
+    for logo_name in ["RP_logo.png", "RP_logo2.png"]:
+        loaded = False
+        local_candidates = [
+            f"public/{logo_name}",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "public", logo_name),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "public", logo_name),
+        ]
+
+        # 1. Try local disk first (fast, resilient, zero-network)
+        for path in local_candidates:
+            if os.path.exists(path):
+                try:
+                    with open(path, "rb") as f:
+                        content = f.read()
+                    phash = _compute_phash(content)
+                    if phash is not None:
+                        hashes.append(phash)
+                        loaded = True
+                        logger.info(f"✅ RP logo variation ({logo_name}) loaded from local file ({path}): {hex(phash)}")
+                        break
+                except Exception as e:
+                    logger.warning(f"⚠️  Failed reading local RP logo from {path}: {e}")
+
+        # 2. Remote fallback
+        if not loaded:
             try:
-                with open(path, "rb") as f:
-                    content = f.read()
-                phash = _compute_phash(content)
+                remote_url = f"https://raw.githubusercontent.com/joshuatochinwachi/HollowScan-Mobile-App/main/public/{logo_name}"
+                logger.info(f"🖼️  Downloading RP logo reference ({logo_name}) from remote...")
+                resp = requests.get(
+                    remote_url,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    timeout=15
+                )
+                resp.raise_for_status()
+                phash = _compute_phash(resp.content)
                 if phash is not None:
-                    _RP_LOGO_PHASH = phash
-                    logger.info(f"✅ RP logo pHash loaded from local file ({path}): {hex(phash)}")
-                    return
+                    hashes.append(phash)
+                    logger.info(f"✅ RP logo variation ({logo_name}) loaded from remote: {hex(phash)}")
             except Exception as e:
-                logger.warning(f"⚠️  Failed reading local RP logo from {path}: {e}")
+                logger.warning(f"⚠️  Could not download {logo_name} ({e})")
 
-    # 2. Remote fallback
-    try:
-        logger.info("🖼️  Downloading RP logo reference from remote...")
-        resp = requests.get(
-            _RP_LOGO_URL,
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=15
-        )
-        resp.raise_for_status()
-        phash = _compute_phash(resp.content)
-        if phash is not None:
-            _RP_LOGO_PHASH = phash
-            logger.info(f"✅ RP logo pHash loaded from remote: {hex(phash)}")
-        else:
-            logger.warning("⚠️  Failed to compute RP logo pHash — logo filter disabled until restart.")
-    except Exception as e:
-        logger.warning(f"⚠️  Could not download RP logo ({e}) — logo filter disabled until restart.")
+    _RP_LOGO_PHASHES = hashes
+    if _RP_LOGO_PHASHES:
+        _RP_LOGO_PHASH = _RP_LOGO_PHASHES[0]
+        logger.info(f"🛡️ Logo filter primed with {len(_RP_LOGO_PHASHES)} reference logo variation(s)")
+    else:
+        logger.warning("⚠️  Failed to load any RP logo pHashes — logo filter disabled until restart.")
 
 
 
@@ -2668,8 +2681,8 @@ def sanitize_logo_image(msg_data: Dict) -> bool:
         return False
 
     # 2. Reference hash must be available
-    if _RP_LOGO_PHASH is None:
-        logger.debug("Logo filter: reference pHash not loaded, skipping check")
+    if not _RP_LOGO_PHASHES:
+        logger.debug("Logo filter: reference pHashes not loaded, skipping check")
         return False
 
     # 3. Extract the primary product image URL
@@ -2746,11 +2759,12 @@ def sanitize_logo_image(msg_data: Dict) -> bool:
     if candidate_hash is None:
         return False
 
-    distance = _hamming_distance(_RP_LOGO_PHASH, candidate_hash)
+    distances = [_hamming_distance(h, candidate_hash) for h in _RP_LOGO_PHASHES]
+    distance = min(distances) if distances else 999
     if distance <= _LOGO_HASH_THRESHOLD:
         logger.info(
             f"🛡️ LOGO SANITIZER: Detected RP logo on msg {msg_data.get('id')} from ch {channel_id} "
-            f"(distance={distance}/{_LOGO_HASH_THRESHOLD}). Replacing with fallback image!"
+            f"(distance={distance}/{_LOGO_HASH_THRESHOLD}, tested {len(_RP_LOGO_PHASHES)} logo variants). Replacing with fallback image!"
         )
         # 1. Update in-memory embed & raw_data so Telegram formatting & sending uses no_image.png
         if embed.get("images") and isinstance(embed["images"], list):
@@ -4066,8 +4080,8 @@ async def list_logo_filters_cmd(update: Update, context: ContextTypes.DEFAULT_TY
     filter_ids = lf.list_all()
     stats = lf.get_stats()
     phash_status = (
-        f"✅ RP logo hash loaded: <code>{hex(_RP_LOGO_PHASH)[:18]}...</code>"
-        if _RP_LOGO_PHASH is not None
+        f"✅ RP logo hashes loaded: <b>{len(_RP_LOGO_PHASHES)} variation(s)</b>"
+        if _RP_LOGO_PHASHES
         else "⚠️ <b>RP logo hash NOT loaded</b> — sanitizing inactive. Restart the bot."
     )
 

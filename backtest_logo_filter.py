@@ -23,7 +23,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-RP_LOGO_URL = "https://raw.githubusercontent.com/joshuatochinwachi/HollowScan-Mobile-App/main/public/RP_logo.png"
+RP_LOGO_URLS = [
+    "https://raw.githubusercontent.com/joshuatochinwachi/HollowScan-Mobile-App/main/public/RP_logo.png",
+    "https://raw.githubusercontent.com/joshuatochinwachi/HollowScan-Mobile-App/main/public/RP_logo2.png",
+]
 FALLBACK_IMAGE_URL = "https://raw.githubusercontent.com/joshuatochinwachi/HollowScan-Mobile-App/main/public/no_image.png"
 LOGO_HASH_THRESHOLD = 10
 
@@ -50,35 +53,42 @@ def compute_phash(img_bytes: bytes) -> Optional[int]:
 def hamming_distance(h1: int, h2: int) -> int:
     return bin(h1 ^ h2).count("1")
 
-def load_rp_logo_phash() -> Optional[int]:
-    local_candidates = [
-        "public/RP_logo.png",
-        "../public/RP_logo.png",
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "public", "RP_logo.png"),
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "public", "RP_logo.png"),
-    ]
-    for path in local_candidates:
-        if os.path.exists(path):
-            try:
-                with open(path, "rb") as f:
-                    phash = compute_phash(f.read())
-                if phash:
-                    print(f"✅ Loaded RP logo pHash from local disk: {path}")
-                    return phash
-            except Exception:
-                pass
+def load_rp_logo_phashes() -> List[int]:
+    hashes = []
+    for logo_name in ["RP_logo.png", "RP_logo2.png"]:
+        loaded = False
+        local_candidates = [
+            f"public/{logo_name}",
+            f"../public/{logo_name}",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "public", logo_name),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "public", logo_name),
+        ]
+        for path in local_candidates:
+            if os.path.exists(path):
+                try:
+                    with open(path, "rb") as f:
+                        phash = compute_phash(f.read())
+                    if phash:
+                        print(f"✅ Loaded RP logo ({logo_name}) pHash from local disk: {path}")
+                        hashes.append(phash)
+                        loaded = True
+                        break
+                except Exception:
+                    pass
 
-    print(f"📥 Downloading RP logo reference from GitHub raw...")
-    try:
-        resp = requests.get(RP_LOGO_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        resp.raise_for_status()
-        phash = compute_phash(resp.content)
-        if phash:
-            print(f"✅ Loaded RP logo pHash from remote: {hex(phash)}")
-            return phash
-    except Exception as e:
-        print(f"❌ Failed to download RP logo: {e}")
-    return None
+        if not loaded:
+            print(f"📥 Downloading {logo_name} reference from GitHub raw...")
+            try:
+                remote_url = f"https://raw.githubusercontent.com/joshuatochinwachi/HollowScan-Mobile-App/main/public/{logo_name}"
+                resp = requests.get(remote_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+                resp.raise_for_status()
+                phash = compute_phash(resp.content)
+                if phash:
+                    print(f"✅ Loaded RP logo ({logo_name}) pHash from remote: {hex(phash)}")
+                    hashes.append(phash)
+            except Exception as e:
+                print(f"❌ Failed to download {logo_name}: {e}")
+    return hashes
 
 def get_monitored_channels(supabase_url: str, supabase_key: str) -> List[str]:
     # 1. Try Supabase storage
@@ -129,9 +139,9 @@ def main():
         print("⚡ MODE: LIVE PATCHING (detected logos will be replaced in DB)")
     print()
 
-    rp_phash = load_rp_logo_phash()
-    if not rp_phash:
-        print("❌ Could not compute RP logo pHash. Exiting.")
+    rp_phashes = load_rp_logo_phashes()
+    if not rp_phashes:
+        print("❌ Could not compute RP logo pHashes. Exiting.")
         sys.exit(1)
 
     monitored_channels = get_monitored_channels(sb_url, sb_key)
@@ -219,7 +229,8 @@ def main():
                     cache[cand_str] = None
 
             if cand_hash is not None:
-                distance = hamming_distance(rp_phash, cand_hash)
+                distances = [hamming_distance(h, cand_hash) for h in rp_phashes]
+                distance = min(distances) if distances else 999
                 if distance <= LOGO_HASH_THRESHOLD:
                     is_match = True
 
