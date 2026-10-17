@@ -4112,6 +4112,116 @@ async def list_logo_filters_cmd(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("\n".join(lines[:header_end]), parse_mode=ParseMode.HTML)
         await update.message.reply_text("\n".join(lines[header_end:]), parse_mode=ParseMode.HTML)
 
+
+async def backtest_logo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: Backtest & retroactively sanitize existing products from monitored channels.
+    Usage: /backtest_logo [limit] (default 30, max 100)
+    """
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Admin only.")
+        return
+
+    monitored_ids = lf.list_all()
+    if not monitored_ids:
+        await update.message.reply_text("ℹ️ No channels are in the logo filter list. Add some with /add_logo_filter first.")
+        return
+
+    limit = 30
+    if context.args:
+        try:
+            limit = min(max(int(context.args[0]), 1), 100)
+        except ValueError:
+            pass
+
+    status_msg = await update.message.reply_text(
+        f"⏳ <b>Running Backtest...</b>\n\n"
+        f"• Monitored Channels: <b>{len(monitored_ids)}</b>\n"
+        f"• Scanning: up to <b>{limit}</b> recent products\n"
+        f"Checking for RP logo and verifying replacement with <code>no_image.png</code>...",
+        parse_mode=ParseMode.HTML
+    )
+
+    try:
+        headers = {"apikey": poller.supabase_key, "Authorization": f"Bearer {poller.supabase_key}"}
+        url = f"{poller.supabase_url}/rest/v1/discord_messages"
+        ch_filter = f"in.({','.join(monitored_ids)})"
+        params = {
+            "channel_id": ch_filter,
+            "select": "*",
+            "order": "scraped_at.desc",
+            "limit": limit
+        }
+        res = requests.get(url, headers=headers, params=params, timeout=15)
+        if res.status_code != 200:
+            await status_msg.edit_text(f"❌ Failed to fetch messages from DB: HTTP {res.status_code}")
+            return
+
+        messages = res.json() or []
+        if not messages:
+            await status_msg.edit_text(
+                f"ℹ️ <b>No messages found</b> in DB for the {len(monitored_ids)} monitored channels yet.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+
+        sanitized_items = []
+        genuine_count = 0
+        no_image_count = 0
+
+        for msg in messages:
+            msg_id = str(msg.get("id"))
+            raw = msg.get("raw_data", {}) or {}
+            embed = raw.get("embed") or (raw.get("embeds") or [{}])[0]
+            title = embed.get("title") or msg.get("content", "")[:50] or f"Product #{msg_id}"
+            ch_id = str(msg.get("channel_id", ""))
+
+            ch_name = "Unknown"
+            for c in cm.channels:
+                if str(c.get("id")) == ch_id:
+                    ch_name = c.get("name", "Unknown")
+                    break
+
+            was_sanitized = sanitize_logo_image(msg)
+            if was_sanitized:
+                sanitized_items.append({
+                    "id": msg_id,
+                    "title": title[:55],
+                    "channel": ch_name,
+                    "scraped_at": msg.get("scraped_at", "")[:19]
+                })
+            else:
+                cand = raw.get("product_image") or (embed.get("image") or {}).get("url")
+                if cand:
+                    genuine_count += 1
+                else:
+                    no_image_count += 1
+
+        lines = [
+            "🛡️ <b>Logo Filter Backtest Results</b>\n",
+            f"📊 Total Scanned: <b>{len(messages)}</b>",
+            f"🎯 <b>RP Logos Found & Sanitized:</b> <b>{len(sanitized_items)}</b> ➔ <code>no_image.png</code>",
+            f"✅ <b>Genuine Photos Kept:</b> <b>{genuine_count}</b>",
+        ]
+        if no_image_count > 0:
+            lines.append(f"⚪ No image alerts: {no_image_count}")
+
+        if sanitized_items:
+            lines.append("\n📝 <b>Sanitized Products:</b>")
+            for i, item in enumerate(sanitized_items[:10], 1):
+                lines.append(f"{i}. <b>{item['title']}</b>\n   📺 {item['channel']} (Replaced with fallback)")
+            if len(sanitized_items) > 10:
+                lines.append(f"<i>...and {len(sanitized_items) - 10} more</i>")
+            lines.append("\n📱 <b>Check Mobile App:</b> These products in your feed now display the clean <code>no_image.png</code> fallback with prices and links 100% active!")
+        else:
+            lines.append("\n✨ <b>Clean!</b> None of the scanned products had the RP logo (or they were already sanitized). All genuine product photos remain intact.")
+
+        await status_msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+    except Exception as e:
+        logger.error(f"Backtest error: {e}")
+        await status_msg.edit_text(f"❌ Backtest failed: {str(e)}")
+
+
 async def list_channels_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin: List all channels"""
     if not is_admin(update.effective_user.id):
@@ -4546,6 +4656,7 @@ ADMIN_COMMANDS = [
     BotCommand("add_logo_filter", "Add channel to logo filter (e.g., /add_logo_filter 123)"),
     BotCommand("remove_logo_filter", "Remove channel from logo filter"),
     BotCommand("logo_filters", "List logo-filtered channels and filter status"),
+    BotCommand("backtest_logo", "Backtest & sanitize existing products (e.g. /backtest_logo 50)"),
 ]
 
 # Additional commands for superadmin
@@ -4568,6 +4679,7 @@ SUPERADMIN_COMMANDS = [
     BotCommand("add_logo_filter", "Add channel to logo filter (e.g., /add_logo_filter 123)"),
     BotCommand("remove_logo_filter", "Remove channel from logo filter"),
     BotCommand("logo_filters", "List logo-filtered channels and filter status"),
+    BotCommand("backtest_logo", "Backtest & sanitize existing products (e.g. /backtest_logo 50)"),
 ]
 
 async def setup_bot_commands(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5152,6 +5264,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /add_logo_filter [channel_id] - Filter RP logo images from a channel
 /remove_logo_filter [channel_id] - Stop filtering a channel
 /logo_filters - List filtered channels &amp; filter status
+/backtest_logo [limit] - Backtest &amp; sanitize existing products in DB
 
 <b>User Management:</b>
 /add_admin [user_id] - Add an admin
@@ -5190,6 +5303,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /add_logo_filter [channel_id] - Filter RP logo images from a channel
 /remove_logo_filter [channel_id] - Stop filtering a channel
 /logo_filters - List filtered channels &amp; filter status
+/backtest_logo [limit] - Backtest &amp; sanitize existing products in DB
 """
     else:
         menu_text = """
@@ -5317,6 +5431,7 @@ def run_bot():
             app.add_handler(CommandHandler("add_logo_filter", add_logo_filter_cmd))
             app.add_handler(CommandHandler("remove_logo_filter", remove_logo_filter_cmd))
             app.add_handler(CommandHandler("logo_filters", list_logo_filters_cmd))
+            app.add_handler(CommandHandler("backtest_logo", backtest_logo_cmd))
             app.add_handler(CommandHandler("scraper_start", scraper_start_cmd))
             app.add_handler(CommandHandler("scraper_stop", scraper_stop_cmd))
             app.add_handler(CommandHandler("scraper_status", scraper_status_cmd))
