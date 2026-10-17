@@ -1721,6 +1721,12 @@ class LogoFilterManager:
                     self.channel_ids = set(json.load(f))
             except Exception:
                 pass
+        elif not loaded and not os.path.exists(self.local_path):
+            # Initial run: seed Supabase storage so future boots don't show 404
+            try:
+                self._save()
+            except Exception:
+                pass
 
     def _save(self):
         """Persist filter list locally and sync to Supabase."""
